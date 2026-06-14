@@ -19,6 +19,23 @@ function Badge({ text, color }) {
   return <span style={{ background: color, color: "#fff", borderRadius: 6, padding: "2px 8px", fontSize: 11, fontWeight: 700, letterSpacing: 0.5 }}>{text}</span>;
 }
 
+// Shows last N results (W/D/L) as small colored circles, most recent on the right
+function FormBadges({ form, size = 22 }) {
+  if (!form || form.length === 0) return <span style={{ color: "#6b7280", fontSize: 11 }}>No matches yet</span>;
+  const colors = { W: "#22c55e", D: "#f0c040", L: "#ef4444" };
+  return (
+    <div style={{ display: "flex", gap: 4 }}>
+      {form.map((r, i) => (
+        <div key={i} style={{
+          width: size, height: size, borderRadius: "50%", background: colors[r],
+          color: "#0f1117", display: "flex", alignItems: "center", justifyContent: "center",
+          fontWeight: 800, fontSize: size * 0.5, flexShrink: 0
+        }}>{r}</div>
+      ))}
+    </div>
+  );
+}
+
 function Notification({ notif, onClose }) {
   useEffect(() => { const t = setTimeout(onClose, 5000); return () => clearTimeout(t); }, []);
   const colors = { start: { bg: "#1a3a2a", border: "#22c55e", icon: "🟢" }, end: { bg: "#2a1a0a", border: "#f0c040", icon: "🏁" }, info: { bg: "#1a1f2e", border: "#3b82f6", icon: "♟️" } };
@@ -226,6 +243,7 @@ export default function ChessClub() {
   const [mTime, setMTime] = useState("");
   const [rMatch, setRMatch] = useState("");
   const [rWinner, setRWinner] = useState("");
+  const [selectedPlayer, setSelectedPlayer] = useState(null);
 
   const isManager = role === "manager";
 
@@ -233,7 +251,7 @@ export default function ChessClub() {
 
   const standings = useMemo(() => {
     const map = {};
-    players.forEach(p => { map[p.id] = { name: p.name, w: 0, d: 0, l: 0, pts: 0 }; });
+    players.forEach(p => { map[p.id] = { id: p.id, name: p.name, w: 0, d: 0, l: 0, pts: 0 }; });
     results.forEach(r => {
       const match = matches.find(m => m.id === r.matchId);
       if (!match) return;
@@ -246,7 +264,46 @@ export default function ChessClub() {
     return Object.values(map).sort((a, b) => b.pts - a.pts);
   }, [players, matches, results]);
 
-  const { downloadAndShare } = useStandingsImage(standings);
+  // Per-player chronological match history with results, used for Form Guide & H2H
+  const playerHistory = useMemo(() => {
+    const map = {};
+    players.forEach(p => { map[p.id] = []; });
+    // results stored in chronological order (order added)
+    results.forEach(r => {
+      const match = matches.find(m => m.id === r.matchId);
+      if (!match) return;
+      const wId = match.whiteId, bId = match.blackId;
+      if (!map[wId] || !map[bId]) return;
+
+      let wRes, bRes;
+      if (r.winner === "white") { wRes = "W"; bRes = "L"; }
+      else if (r.winner === "black") { wRes = "L"; bRes = "W"; }
+      else { wRes = "D"; bRes = "D"; }
+
+      map[wId].push({ matchId: match.id, opponentId: bId, opponentName: match.blackName, result: wRes, date: match.date, color: "white" });
+      map[bId].push({ matchId: match.id, opponentId: wId, opponentName: match.whiteName, result: bRes, date: match.date, color: "black" });
+    });
+    return map;
+  }, [players, matches, results]);
+
+  const getForm = (playerId, count = 5) => {
+    const hist = playerHistory[playerId] || [];
+    return hist.slice(-count).map(h => h.result);
+  };
+
+  const getHeadToHead = (playerAId, playerBId) => {
+    const hist = playerHistory[playerAId] || [];
+    const relevant = hist.filter(h => h.opponentId === playerBId);
+    const summary = { aWins: 0, draws: 0, bWins: 0, games: relevant.length };
+    relevant.forEach(h => {
+      if (h.result === "W") summary.aWins++;
+      else if (h.result === "L") summary.bWins++;
+      else summary.draws++;
+    });
+    return { summary, matches: relevant };
+  };
+
+
   const [imgModal, setImgModal] = useState(null);
 
   const sendWA = (phone, message) => {
@@ -345,6 +402,105 @@ export default function ChessClub() {
         </div>
       )}
 
+      {selectedPlayer && (() => {
+        const player = players.find(p => p.id === selectedPlayer);
+        if (!player) return null;
+        const stat = standings.find(p => p.id === selectedPlayer) || { w: 0, d: 0, l: 0, pts: 0 };
+        const history = (playerHistory[selectedPlayer] || []).slice().reverse();
+        const otherPlayers = players.filter(p => p.id !== selectedPlayer);
+
+        return (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", zIndex: 10000, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={() => setSelectedPlayer(null)}>
+            <div style={{ background: "#1a1f2e", border: "1px solid #2a2f3e", borderRadius: "16px 16px 0 0", padding: 24, width: "100%", maxWidth: 640, maxHeight: "85vh", overflowY: "auto" }} onClick={e => e.stopPropagation()}>
+              {/* Header */}
+              <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 16 }}>
+                <Avatar name={player.name} size={56} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 800, fontSize: 18, color: "#fff" }}>{player.name}</div>
+                  <Badge text={player.level} color={player.level === "Expert" ? "#7c3aed" : player.level === "Advanced" ? "#b45309" : player.level === "Intermediate" ? "#1d6b4d" : "#374151"} />
+                </div>
+                <button onClick={() => setSelectedPlayer(null)} style={{ background: "none", border: "none", color: "#6b7280", fontSize: 24, cursor: "pointer", lineHeight: 1 }}>×</button>
+              </div>
+
+              {/* Stats grid */}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 16 }}>
+                <div style={{ background: "#0f1117", borderRadius: 10, padding: "12px 8px", textAlign: "center" }}>
+                  <div style={{ fontSize: 20, fontWeight: 800, color: "#f0c040" }}>{stat.pts}</div>
+                  <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5 }}>Points</div>
+                </div>
+                <div style={{ background: "#0f1117", borderRadius: 10, padding: "12px 8px", textAlign: "center" }}>
+                  <div style={{ fontSize: 20, fontWeight: 800, color: "#22c55e" }}>{stat.w}</div>
+                  <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5 }}>Wins</div>
+                </div>
+                <div style={{ background: "#0f1117", borderRadius: 10, padding: "12px 8px", textAlign: "center" }}>
+                  <div style={{ fontSize: 20, fontWeight: 800, color: "#9ca3af" }}>{stat.d}</div>
+                  <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5 }}>Draws</div>
+                </div>
+                <div style={{ background: "#0f1117", borderRadius: 10, padding: "12px 8px", textAlign: "center" }}>
+                  <div style={{ fontSize: 20, fontWeight: 800, color: "#ef4444" }}>{stat.l}</div>
+                  <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5 }}>Losses</div>
+                </div>
+              </div>
+
+              {/* Form Guide */}
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#6b7280", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>Form (Last 5)</div>
+                <FormBadges form={getForm(selectedPlayer, 5)} size={28} />
+              </div>
+
+              {/* Match History */}
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#6b7280", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>Match History</div>
+                {history.length === 0 && <div style={{ color: "#6b7280", fontSize: 13, padding: "12px 0" }}>No matches played yet.</div>}
+                {history.map((h, i) => {
+                  const resultColor = h.result === "W" ? "#22c55e" : h.result === "L" ? "#ef4444" : "#f0c040";
+                  const resultText = h.result === "W" ? "Won" : h.result === "L" ? "Lost" : "Drew";
+                  return (
+                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderBottom: "1px solid #2a2f3e" }}>
+                      <div style={{ width: 28, height: 28, borderRadius: "50%", background: resultColor, color: "#0f1117", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 13, flexShrink: 0 }}>{h.result}</div>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 13, color: "#fff", fontWeight: 600 }}>{resultText} vs {h.opponentName}</div>
+                        <div style={{ fontSize: 11, color: "#6b7280" }}>{h.color === "white" ? "⬜ White" : "⬛ Black"} • {h.date}</div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Head-to-Head */}
+              {otherPlayers.length > 0 && (
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#6b7280", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>Head-to-Head</div>
+                  {otherPlayers.map(opp => {
+                    const { summary } = getHeadToHead(selectedPlayer, opp.id);
+                    if (summary.games === 0) return null;
+                    return (
+                      <div key={opp.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderBottom: "1px solid #2a2f3e" }}>
+                        <Avatar name={opp.name} size={28} />
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: 13, color: "#fff", fontWeight: 600 }}>vs {opp.name}</div>
+                          <div style={{ fontSize: 11, color: "#6b7280" }}>{summary.games} game{summary.games > 1 ? "s" : ""} played</div>
+                        </div>
+                        <div style={{ display: "flex", gap: 6, fontSize: 12, fontWeight: 700 }}>
+                          <span style={{ color: "#22c55e" }}>{summary.aWins}W</span>
+                          <span style={{ color: "#f0c040" }}>{summary.draws}D</span>
+                          <span style={{ color: "#ef4444" }}>{summary.bWins}L</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {otherPlayers.every(opp => getHeadToHead(selectedPlayer, opp.id).summary.games === 0) && (
+                    <div style={{ color: "#6b7280", fontSize: 13, padding: "12px 0" }}>No head-to-head matches yet.</div>
+                  )}
+                </div>
+              )}
+
+              <button style={{ ...s.btn(), marginTop: 16 }} onClick={() => setSelectedPlayer(null)}>Close</button>
+            </div>
+          </div>
+        );
+      })()}
+
       <div style={s.header}>
         <div style={s.topRow}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -411,15 +567,16 @@ export default function ChessClub() {
               <div style={s.sectionTitle}>Members ({players.length})</div>
               {players.length === 0 && <div style={s.empty}>No players yet.{isManager ? " Add your first member above." : ""}</div>}
               {players.map(p => (
-                <div key={p.id} style={s.playerRow}>
+                <div key={p.id} style={{ ...s.playerRow, cursor: "pointer" }} onClick={() => setSelectedPlayer(p.id)}>
                   <Avatar name={p.name} />
-                  <div style={{ flex: 1 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontWeight: 600, fontSize: 14, color: "#fff" }}>{p.name}</div>
-                    <div style={{ fontSize: 12, color: "#6b7280" }}>{p.phone || "No phone"}</div>
+                    <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 4 }}>{p.phone || "No phone"}</div>
+                    <FormBadges form={getForm(p.id)} size={18} />
                   </div>
                   <Badge text={p.level} color={p.level === "Expert" ? "#7c3aed" : p.level === "Advanced" ? "#b45309" : p.level === "Intermediate" ? "#1d6b4d" : "#374151"} />
                   {isManager && p.phone && (
-                    <button style={s.waBtn} onClick={() => sendWA(p.phone.replace(/\D/g, ""), `Hi ${p.name}! 👋 Welcome to ${APP_NAME}!`)}>
+                    <button style={s.waBtn} onClick={(e) => { e.stopPropagation(); sendWA(p.phone.replace(/\D/g, ""), `Hi ${p.name}! 👋 Welcome to ${APP_NAME}!`); }}>
                       <span>📱</span> Chat
                     </button>
                   )}
@@ -556,16 +713,17 @@ export default function ChessClub() {
             {standings.length > 0 && (
               <>
                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                  <thead><tr><th style={s.th}>#</th><th style={s.th}>Player</th><th style={s.th}>W</th><th style={s.th}>D</th><th style={s.th}>L</th><th style={s.th}>Pts</th></tr></thead>
+                  <thead><tr><th style={s.th}>#</th><th style={s.th}>Player</th><th style={s.th}>W</th><th style={s.th}>D</th><th style={s.th}>L</th><th style={s.th}>Pts</th><th style={s.th}>Form</th></tr></thead>
                   <tbody>
                     {standings.map((p, i) => (
-                      <tr key={p.name} style={{ background: i === 0 ? "rgba(240,192,64,0.07)" : "transparent" }}>
+                      <tr key={p.id} style={{ background: i === 0 ? "rgba(240,192,64,0.07)" : "transparent", cursor: "pointer" }} onClick={() => setSelectedPlayer(p.id)}>
                         <td style={{ ...s.td, color: i === 0 ? "#f0c040" : "#6b7280", fontWeight: 700 }}>{i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : i + 1}</td>
                         <td style={{ ...s.td, color: "#fff", fontWeight: 600 }}>{p.name}</td>
                         <td style={{ ...s.td, color: "#22c55e" }}>{p.w}</td>
                         <td style={{ ...s.td, color: "#f0c040" }}>{p.d}</td>
                         <td style={{ ...s.td, color: "#ef4444" }}>{p.l}</td>
                         <td style={{ ...s.td, fontWeight: 800, color: i === 0 ? "#f0c040" : "#e8e6e0" }}>{p.pts}</td>
+                        <td style={s.td}><FormBadges form={getForm(p.id)} size={18} /></td>
                       </tr>
                     ))}
                   </tbody>
