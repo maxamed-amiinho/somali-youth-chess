@@ -1,10 +1,10 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { initializeApp } from "firebase/app";
 import { getFirestore, doc, setDoc, onSnapshot } from "firebase/firestore";
+import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "firebase/auth";
 
 const TABS = ["Players", "Schedule", "Results", "Standings"];
 const MANAGER_EMAIL = "amiinho@gmail.com";
-const MANAGER_PASS = "hooyo2023";
 const PTS = { win: 3, draw: 1, loss: 0 };
 const APP_NAME = "SOMALI YOUTH CHESS";
 const WA_GROUP = "https://chat.whatsapp.com/CTZsNTSWfKwD3nOV64edsM";
@@ -21,6 +21,7 @@ const firebaseConfig = {
 
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
+const auth = getAuth(firebaseApp);
 
 // Single shared document holding all club data
 const CLUB_DOC = doc(db, "chessClub", "data");
@@ -75,9 +76,19 @@ function LoginScreen({ onLogin }) {
   const [pass, setPass] = useState("");
   const [error, setError] = useState("");
   const [showPass, setShowPass] = useState(false);
-  const handleLogin = () => {
-    if (email.trim() === MANAGER_EMAIL && pass === MANAGER_PASS) onLogin("manager");
-    else setError("Incorrect email or password.");
+  const [loading, setLoading] = useState(false);
+
+  const handleLogin = async () => {
+    setError("");
+    setLoading(true);
+    try {
+      await signInWithEmailAndPassword(auth, email.trim(), pass);
+      onLogin("manager");
+    } catch (err) {
+      setError("Incorrect email or password.");
+    } finally {
+      setLoading(false);
+    }
   };
   const s = {
     wrap: { minHeight: "100vh", background: "#0f1117", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, fontFamily: "'Inter','Segoe UI',sans-serif" },
@@ -109,7 +120,7 @@ function LoginScreen({ onLogin }) {
           </div>
         </div>
         {error && <div style={s.error}>⚠️ {error}</div>}
-        <button style={s.btn} onClick={handleLogin}>Login as Manager</button>
+        <button style={s.btn} onClick={handleLogin} disabled={loading}>{loading ? "Logging in..." : "Login as Manager"}</button>
         <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "20px 0", color: "#374151", fontSize: 12 }}>
           <div style={s.line} /><span>or</span><div style={s.line} />
         </div>
@@ -273,6 +284,16 @@ export default function ChessClub() {
   const isManager = role === "manager";
 
   const showNotif = (type, title, body) => setNotif({ type, title, body, id: Date.now() });
+
+  // === FIREBASE AUTH: Restore manager session on page reload ===
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (user && user.email === MANAGER_EMAIL) {
+        setRole((prev) => prev || "manager");
+      }
+    });
+    return () => unsubscribe();
+  }, []);
 
   // === FIRESTORE: Real-time sync ===
   // Subscribe once to the shared club document. Any change made here (by any user/device)
@@ -631,7 +652,7 @@ export default function ChessClub() {
           </div>
           <div style={{ display: "flex", alignItems: "center" }}>
             <div style={s.roleBadge}>{isManager ? "👑 Manager" : "👀 Viewer"}</div>
-            <button style={s.logoutBtn} onClick={() => setRole(null)}>Logout</button>
+            <button style={s.logoutBtn} onClick={() => { signOut(auth).catch(() => {}); setRole(null); }}>Logout</button>
           </div>
         </div>
         <div style={s.tabs}>
