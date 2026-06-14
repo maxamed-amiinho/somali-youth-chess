@@ -3,7 +3,7 @@ import { initializeApp } from "firebase/app";
 import { getFirestore, doc, setDoc, onSnapshot } from "firebase/firestore";
 import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "firebase/auth";
 
-const TABS = ["Players", "Schedule", "Results", "Standings"];
+const TABS = ["Dashboard", "Players", "Schedule", "Results", "Standings"];
 const MANAGER_EMAIL = "amiinho@gmail.com";
 const PTS = { win: 3, draw: 1, loss: 0 };
 const APP_NAME = "SOMALI YOUTH CHESS";
@@ -26,9 +26,45 @@ const auth = getAuth(firebaseApp);
 // Single shared document holding all club data
 const CLUB_DOC = doc(db, "chessClub", "data");
 
-function Avatar({ name, size = 36 }) {
+// === THEME PALETTES ===
+const THEMES = {
+  dark: {
+    bg: "#0f1117",
+    bgCard: "#1a1f2e",
+    bgInput: "#0f1117",
+    border: "#2a2f3e",
+    border2: "#1a1f2e",
+    text: "#e8e6e0",
+    textBright: "#fff",
+    textMuted: "#6b7280",
+    textMuted2: "#9ca3af",
+    gold: "#f0c040",
+    headerGrad: "linear-gradient(135deg,#1a1f2e 0%,#0f1117 100%)",
+  },
+  light: {
+    bg: "#f4f5f7",
+    bgCard: "#ffffff",
+    bgInput: "#f4f5f7",
+    border: "#e2e4ea",
+    border2: "#eef0f4",
+    text: "#1f2430",
+    textBright: "#0f1117",
+    textMuted: "#6b7280",
+    textMuted2: "#4b5563",
+    gold: "#b8860b",
+    headerGrad: "linear-gradient(135deg,#ffffff 0%,#f4f5f7 100%)",
+  },
+};
+
+
+function Avatar({ name, size = 36, photo }) {
   const initials = name.split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase();
   const hue = [...name].reduce((a, c) => a + c.charCodeAt(0), 0) % 360;
+  if (photo) {
+    return (
+      <img src={photo} alt={name} style={{ width: size, height: size, borderRadius: "50%", objectFit: "cover", flexShrink: 0, border: "2px solid rgba(255,255,255,0.15)" }} />
+    );
+  }
   return (
     <div style={{ width: size, height: size, borderRadius: "50%", background: `hsl(${hue},55%,38%)`, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: size * 0.38, flexShrink: 0, border: "2px solid rgba(255,255,255,0.15)" }}>{initials}</div>
   );
@@ -69,6 +105,33 @@ function Notification({ notif, onClose }) {
       <button onClick={onClose} style={{ background: "none", border: "none", color: "#6b7280", cursor: "pointer", fontSize: 18, lineHeight: 1, padding: 0 }}>×</button>
     </div>
   );
+}
+
+// Resize an uploaded image file down to a small square JPEG data URL,
+// keeping the stored player photo small enough for Firestore documents.
+function resizeImageToDataUrl(file, maxSize = 128, quality = 0.8) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        // Crop to a centered square, then scale to maxSize x maxSize
+        const side = Math.min(img.width, img.height);
+        const sx = (img.width - side) / 2;
+        const sy = (img.height - side) / 2;
+        canvas.width = maxSize;
+        canvas.height = maxSize;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, sx, sy, side, side, 0, 0, maxSize, maxSize);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 }
 
 function LoginScreen({ onLogin }) {
@@ -131,7 +194,7 @@ function LoginScreen({ onLogin }) {
 }
 
 // Draw standings card to canvas and share as image
-function useStandingsImage(standings) {
+function useStandingsImage(standings, seasonName) {
   const canvasRef = useRef(null);
 
   const generateImage = () => {
@@ -158,7 +221,7 @@ function useStandingsImage(standings) {
 
       ctx.fillStyle = "#6b7280";
       ctx.font = "13px Arial";
-      ctx.fillText("STANDINGS", W / 2, 60);
+      ctx.fillText((seasonName ? seasonName.toUpperCase() + " — " : "") + "STANDINGS", W / 2, 60);
 
       // Points legend
       ctx.font = "11px Arial";
@@ -257,11 +320,24 @@ function useStandingsImage(standings) {
 
 export default function ChessClub() {
   const [role, setRole] = useState(null);
-  const [tab, setTab] = useState("Players");
+  const [tab, setTab] = useState("Dashboard");
   const [players, setPlayers] = useState([]);
   const [matches, setMatches] = useState([]);
   const [results, setResults] = useState([]);
+  const [activity, setActivity] = useState([]);
   const [notif, setNotif] = useState(null);
+  const [playerSearch, setPlayerSearch] = useState("");
+  const [theme, setTheme] = useState(() => {
+    if (typeof window !== "undefined") {
+      const saved = window.localStorage.getItem("syc_theme");
+      if (saved === "light" || saved === "dark") return saved;
+    }
+    return "dark";
+  });
+  const [seasons, setSeasons] = useState([]); // [{ id, name, endedAt, standings, activity }]
+  const [currentSeasonName, setCurrentSeasonName] = useState("Season 1");
+  const [showEndSeasonConfirm, setShowEndSeasonConfirm] = useState(false);
+  const [nextSeasonName, setNextSeasonName] = useState("");
   const [dbLoaded, setDbLoaded] = useState(false);
   const [dbError, setDbError] = useState(null);
   const isLocalUpdate = useRef(false);
@@ -269,6 +345,7 @@ export default function ChessClub() {
   const [pName, setPName] = useState("");
   const [pPhone, setPPhone] = useState("");
   const [pLevel, setPLevel] = useState("Intermediate");
+  const [pPhoto, setPPhoto] = useState(null);
   const [mWhite, setMWhite] = useState("");
   const [mBlack, setMBlack] = useState("");
   const [mDate, setMDate] = useState("");
@@ -280,6 +357,7 @@ export default function ChessClub() {
   const [editName, setEditName] = useState("");
   const [editPhone, setEditPhone] = useState("");
   const [editLevel, setEditLevel] = useState("Intermediate");
+  const [editPhoto, setEditPhoto] = useState(null);
 
   const isManager = role === "manager";
 
@@ -295,6 +373,13 @@ export default function ChessClub() {
     return () => unsubscribe();
   }, []);
 
+  // Persist theme preference locally (per-device UI preference)
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("syc_theme", theme);
+    }
+  }, [theme]);
+
   // === FIRESTORE: Real-time sync ===
   // Subscribe once to the shared club document. Any change made here (by any user/device)
   // updates Firestore, and Firestore pushes the new data back to everyone in real time.
@@ -308,6 +393,9 @@ export default function ChessClub() {
           setPlayers(data.players || []);
           setMatches(data.matches || []);
           setResults(data.results || []);
+          setActivity(data.activity || []);
+          setSeasons(data.seasons || []);
+          setCurrentSeasonName(data.currentSeasonName || "Season 1");
         }
         setDbLoaded(true);
         setDbError(null);
@@ -321,7 +409,7 @@ export default function ChessClub() {
     return () => unsubscribe();
   }, []);
 
-  // Whenever players/matches/results change locally, save to Firestore
+  // Whenever players/matches/results/activity/seasons change locally, save to Firestore
   // (skip the very first sync that came FROM Firestore to avoid an extra write loop)
   useEffect(() => {
     if (!dbLoaded) return;
@@ -329,11 +417,11 @@ export default function ChessClub() {
       isLocalUpdate.current = false;
       return;
     }
-    setDoc(CLUB_DOC, { players, matches, results, updatedAt: Date.now() }).catch((err) => {
+    setDoc(CLUB_DOC, { players, matches, results, activity, seasons, currentSeasonName, updatedAt: Date.now() }).catch((err) => {
       console.error("Firestore save error:", err);
       setDbError(err.message);
     });
-  }, [players, matches, results, dbLoaded]);
+  }, [players, matches, results, activity, seasons, currentSeasonName, dbLoaded]);
 
   const standings = useMemo(() => {
     const map = {};
@@ -349,6 +437,8 @@ export default function ChessClub() {
     });
     return Object.values(map).sort((a, b) => b.pts - a.pts);
   }, [players, matches, results]);
+
+  const { downloadAndShare } = useStandingsImage(standings, currentSeasonName);
 
   // Per-player chronological match history with results, used for Form Guide & H2H
   const playerHistory = useMemo(() => {
@@ -389,6 +479,11 @@ export default function ChessClub() {
     return { summary, matches: relevant };
   };
 
+  const getPlayerPhoto = (playerId) => {
+    const p = players.find(pl => pl.id === playerId);
+    return p ? p.photo : undefined;
+  };
+
 
   const [imgModal, setImgModal] = useState(null);
 
@@ -404,18 +499,24 @@ export default function ChessClub() {
     document.body.removeChild(a);
   };
 
+  const logActivity = (icon, text) => {
+    setActivity(prev => [...prev, { id: Date.now(), icon, text, ts: Date.now() }].slice(-50));
+  };
+
   const addPlayer = () => {
     if (!pName.trim()) return;
-    const player = { id: Date.now(), name: pName.trim(), phone: pPhone.trim(), level: pLevel };
+    const player = { id: Date.now(), name: pName.trim(), phone: pPhone.trim(), level: pLevel, photo: pPhoto || null };
     setPlayers(p => [...p, player]);
-    setPName(""); setPPhone(""); setPLevel("Intermediate");
+    setPName(""); setPPhone(""); setPLevel("Intermediate"); setPPhoto(null);
     showNotif("info", "New Player Added!", `${player.name} joined as ${player.level}`);
+    logActivity("👤", `${player.name} joined the club as ${player.level}`);
   };
 
   const startEditPlayer = (player) => {
     setEditName(player.name);
     setEditPhone(player.phone || "");
     setEditLevel(player.level);
+    setEditPhoto(player.photo || null);
     setEditingPlayer(true);
   };
 
@@ -423,12 +524,14 @@ export default function ChessClub() {
     if (!editName.trim()) return;
     const oldPlayer = players.find(p => p.id === playerId);
     const levelChanged = oldPlayer && oldPlayer.level !== editLevel;
-    setPlayers(prev => prev.map(p => p.id === playerId ? { ...p, name: editName.trim(), phone: editPhone.trim(), level: editLevel } : p));
+    setPlayers(prev => prev.map(p => p.id === playerId ? { ...p, name: editName.trim(), phone: editPhone.trim(), level: editLevel, photo: editPhoto || null } : p));
     setEditingPlayer(false);
     if (levelChanged) {
       showNotif("info", "Player Updated!", `${editName.trim()} is now ${editLevel} (was ${oldPlayer.level})`);
+      logActivity("⬆️", `${editName.trim()} leveled up from ${oldPlayer.level} to ${editLevel}`);
     } else {
       showNotif("info", "Player Updated!", `${editName.trim()}'s info was updated`);
+      logActivity("✏️", `${editName.trim()}'s profile was updated`);
     }
   };
 
@@ -440,12 +543,14 @@ export default function ChessClub() {
     setMatches(m => [...m, match]);
     setMWhite(""); setMBlack(""); setMDate(""); setMTime("");
     showNotif("info", "Match Scheduled!", `${w.name} vs ${b.name} on ${mDate}`);
+    logActivity("📅", `Match scheduled: ${w.name} vs ${b.name} on ${mDate}`);
   };
 
   const startMatch = (matchId) => {
     const match = matches.find(m => m.id === matchId);
     setMatches(prev => prev.map(m => m.id === matchId ? { ...m, started: true } : m));
     showNotif("start", "🟢 Match Started!", `${match.whiteName} vs ${match.blackName} — Game is live!`);
+    logActivity("🟢", `Match started: ${match.whiteName} vs ${match.blackName}`);
   };
 
   const addResult = () => {
@@ -457,6 +562,30 @@ export default function ChessClub() {
     const winnerName = rWinner === "white" ? match.whiteName : rWinner === "black" ? match.blackName : null;
     const scoreText = winnerName ? `🏆 *${winnerName}* wins!` : "🤝 It's a Draw!";
     showNotif("end", "🏁 Match Finished!", `${match.whiteName} vs ${match.blackName} — ${winnerName ? winnerName + " wins!" : "Draw!"}`);
+    logActivity("🏁", winnerName ? `${winnerName} won vs ${winnerName === match.whiteName ? match.blackName : match.whiteName}` : `${match.whiteName} vs ${match.blackName} ended in a draw`);
+  };
+
+  // Archive the current season's standings, then reset matches/results for a fresh season.
+  // Players and their photos/levels carry over unchanged.
+  const endSeason = () => {
+    if (standings.length === 0) return;
+    const champion = standings[0];
+    const seasonRecord = {
+      id: Date.now(),
+      name: currentSeasonName,
+      endedAt: Date.now(),
+      standings: standings.map(p => ({ id: p.id, name: p.name, w: p.w, d: p.d, l: p.l, pts: p.pts })),
+      champion: { id: champion.id, name: champion.name, pts: champion.pts },
+    };
+    setSeasons(prev => [...prev, seasonRecord]);
+    setMatches([]);
+    setResults([]);
+    const newName = nextSeasonName.trim() || `Season ${seasons.length + 2}`;
+    setCurrentSeasonName(newName);
+    setNextSeasonName("");
+    setShowEndSeasonConfirm(false);
+    showNotif("end", "🏆 Season Ended!", `${champion.name} won ${seasonRecord.name} with ${champion.pts} pts! ${newName} has begun.`);
+    logActivity("🏆", `${seasonRecord.name} ended — Champion: ${champion.name} (${champion.pts} pts). ${newName} begins!`);
   };
 
   if (!role) return <LoginScreen onLogin={setRole} />;
@@ -465,31 +594,34 @@ export default function ChessClub() {
   const startedMatches = pendingMatches.filter(m => m.started);
   const notStartedMatches = pendingMatches.filter(m => !m.started);
 
+  const T = THEMES[theme];
   const s = {
-    app: { minHeight: "100vh", background: "#0f1117", color: "#e8e6e0", fontFamily: "'Inter','Segoe UI',sans-serif" },
-    header: { background: "linear-gradient(135deg,#1a1f2e 0%,#0f1117 100%)", borderBottom: "1px solid #2a2f3e", padding: "16px 20px 0" },
+    app: { minHeight: "100vh", background: T.bg, color: T.text, fontFamily: "'Inter','Segoe UI',sans-serif" },
+    header: { background: T.headerGrad, borderBottom: `1px solid ${T.border}`, padding: "16px 20px 0" },
     topRow: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 },
-    appTitle: { fontSize: 15, fontWeight: 800, color: "#f0c040", letterSpacing: 1 },
-    roleBadge: { background: isManager ? "rgba(240,192,64,0.15)" : "rgba(107,114,128,0.2)", color: isManager ? "#f0c040" : "#9ca3af", border: `1px solid ${isManager ? "rgba(240,192,64,0.3)" : "#374151"}`, borderRadius: 20, padding: "4px 12px", fontSize: 11, fontWeight: 700 },
-    logoutBtn: { background: "none", border: "1px solid #2a2f3e", borderRadius: 6, color: "#6b7280", fontSize: 11, padding: "4px 10px", cursor: "pointer", marginLeft: 8 },
-    tabs: { display: "flex", gap: 4 },
-    tab: (active) => ({ padding: "10px 14px", border: "none", cursor: "pointer", fontSize: 12, fontWeight: 600, borderRadius: "8px 8px 0 0", transition: "all 0.15s", background: active ? "#1e2435" : "transparent", color: active ? "#f0c040" : "#6b7280", borderBottom: active ? "2px solid #f0c040" : "2px solid transparent" }),
+    appTitle: { fontSize: 15, fontWeight: 800, color: T.gold, letterSpacing: 1 },
+    roleBadge: { background: isManager ? "rgba(240,192,64,0.15)" : "rgba(107,114,128,0.2)", color: isManager ? T.gold : T.textMuted2, border: `1px solid ${isManager ? "rgba(240,192,64,0.3)" : T.border}`, borderRadius: 20, padding: "4px 12px", fontSize: 11, fontWeight: 700 },
+    logoutBtn: { background: "none", border: `1px solid ${T.border}`, borderRadius: 6, color: T.textMuted, fontSize: 11, padding: "4px 10px", cursor: "pointer", marginLeft: 8 },
+    themeBtn: { background: "none", border: `1px solid ${T.border}`, borderRadius: 6, color: T.textMuted, fontSize: 13, padding: "4px 8px", cursor: "pointer", marginLeft: 8 },
+    tabs: { display: "flex", gap: 4, overflowX: "auto" },
+    tab: (active) => ({ padding: "10px 14px", border: "none", cursor: "pointer", fontSize: 12, fontWeight: 600, borderRadius: "8px 8px 0 0", transition: "all 0.15s", background: active ? T.bgCard : "transparent", color: active ? T.gold : T.textMuted, borderBottom: active ? `2px solid ${T.gold}` : "2px solid transparent", whiteSpace: "nowrap" }),
     body: { padding: 20, maxWidth: 640, margin: "0 auto" },
-    card: { background: "#1a1f2e", border: "1px solid #2a2f3e", borderRadius: 12, padding: 20, marginBottom: 16 },
-    viewerBanner: { background: "rgba(107,114,128,0.1)", border: "1px solid #374151", borderRadius: 10, padding: "12px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 10, fontSize: 13, color: "#9ca3af" },
+    card: { background: T.bgCard, border: `1px solid ${T.border}`, borderRadius: 12, padding: 20, marginBottom: 16 },
+    card2: { background: T.bgCard, border: `1px solid ${T.border}`, borderRadius: 12, padding: "14px 8px", textAlign: "center" },
+    viewerBanner: { background: "rgba(107,114,128,0.1)", border: `1px solid ${T.border}`, borderRadius: 10, padding: "12px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 10, fontSize: 13, color: T.textMuted2 },
     ptsBanner: { background: "rgba(240,192,64,0.08)", border: "1px solid rgba(240,192,64,0.2)", borderRadius: 10, padding: "10px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 16, fontSize: 12, flexWrap: "wrap" },
-    label: { fontSize: 11, fontWeight: 700, color: "#6b7280", letterSpacing: 1, textTransform: "uppercase", marginBottom: 6, display: "block" },
-    input: { width: "100%", background: "#0f1117", border: "1px solid #2a2f3e", borderRadius: 8, padding: "10px 12px", color: "#e8e6e0", fontSize: 14, outline: "none", boxSizing: "border-box" },
-    select: { width: "100%", background: "#0f1117", border: "1px solid #2a2f3e", borderRadius: 8, padding: "10px 12px", color: "#e8e6e0", fontSize: 14, outline: "none", boxSizing: "border-box" },
+    label: { fontSize: 11, fontWeight: 700, color: T.textMuted, letterSpacing: 1, textTransform: "uppercase", marginBottom: 6, display: "block" },
+    input: { width: "100%", background: T.bgInput, border: `1px solid ${T.border}`, borderRadius: 8, padding: "10px 12px", color: T.text, fontSize: 14, outline: "none", boxSizing: "border-box" },
+    select: { width: "100%", background: T.bgInput, border: `1px solid ${T.border}`, borderRadius: 8, padding: "10px 12px", color: T.text, fontSize: 14, outline: "none", boxSizing: "border-box" },
     row: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 },
-    btn: (color) => { const c = color || "#f0c040"; return { background: c, color: c === "#f0c040" ? "#0f1117" : "#fff", border: "none", borderRadius: 8, padding: "11px 18px", fontWeight: 700, fontSize: 13, cursor: "pointer", width: "100%", marginTop: 12 }; },
+    btn: (color) => { const c = color || T.gold; return { background: c, color: c === T.gold ? "#0f1117" : "#fff", border: "none", borderRadius: 8, padding: "11px 18px", fontWeight: 700, fontSize: 13, cursor: "pointer", width: "100%", marginTop: 12 }; },
     startBtn: { background: "#22c55e", color: "#fff", border: "none", borderRadius: 7, padding: "6px 12px", fontWeight: 700, fontSize: 11, cursor: "pointer" },
     waBtn: { background: "#25D366", color: "#fff", border: "none", borderRadius: 8, padding: "8px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 },
-    playerRow: { display: "flex", alignItems: "center", gap: 12, padding: "12px 0", borderBottom: "1px solid #2a2f3e" },
-    sectionTitle: { fontSize: 16, fontWeight: 700, color: "#fff", marginBottom: 16 },
-    th: { padding: "10px 12px", textAlign: "left", fontSize: 11, fontWeight: 700, color: "#6b7280", letterSpacing: 1, textTransform: "uppercase", borderBottom: "1px solid #2a2f3e" },
-    td: { padding: "12px 12px", fontSize: 13, borderBottom: "1px solid #1a1f2e" },
-    empty: { textAlign: "center", color: "#6b7280", padding: 32, fontSize: 13 },
+    playerRow: { display: "flex", alignItems: "center", gap: 12, padding: "12px 0", borderBottom: `1px solid ${T.border}` },
+    sectionTitle: { fontSize: 16, fontWeight: 700, color: T.textBright, marginBottom: 16 },
+    th: { padding: "10px 12px", textAlign: "left", fontSize: 11, fontWeight: 700, color: T.textMuted, letterSpacing: 1, textTransform: "uppercase", borderBottom: `1px solid ${T.border}` },
+    td: { padding: "12px 12px", fontSize: 13, borderBottom: `1px solid ${T.border2}` },
+    empty: { textAlign: "center", color: T.textMuted, padding: 32, fontSize: 13 },
     liveDot: { width: 8, height: 8, borderRadius: "50%", background: "#22c55e", display: "inline-block", marginRight: 6, animation: "pulse 1.5s infinite" },
   };
 
@@ -517,25 +649,40 @@ export default function ChessClub() {
 
         return (
           <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", zIndex: 10000, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={() => { setSelectedPlayer(null); setEditingPlayer(false); }}>
-            <div style={{ background: "#1a1f2e", border: "1px solid #2a2f3e", borderRadius: "16px 16px 0 0", padding: 24, width: "100%", maxWidth: 640, maxHeight: "85vh", overflowY: "auto" }} onClick={e => e.stopPropagation()}>
+            <div style={{ background: T.bgCard, border: `1px solid ${T.border}`, borderRadius: "16px 16px 0 0", padding: 24, width: "100%", maxWidth: 640, maxHeight: "85vh", overflowY: "auto" }} onClick={e => e.stopPropagation()}>
               {/* Header */}
               {!editingPlayer ? (
                 <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 16 }}>
-                  <Avatar name={player.name} size={56} />
+                  <Avatar name={player.name} size={56} photo={player.photo} />
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 800, fontSize: 18, color: "#fff" }}>{player.name}</div>
+                    <div style={{ fontWeight: 800, fontSize: 18, color: T.textBright }}>{player.name}</div>
                     <Badge text={player.level} color={player.level === "Expert" ? "#7c3aed" : player.level === "Advanced" ? "#b45309" : player.level === "Intermediate" ? "#1d6b4d" : "#374151"} />
                   </div>
                   {isManager && (
                     <button onClick={() => startEditPlayer(player)} style={{ background: "rgba(240,192,64,0.12)", border: "1px solid rgba(240,192,64,0.3)", color: "#f0c040", borderRadius: 8, padding: "6px 12px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>✏️ Edit</button>
                   )}
-                  <button onClick={() => { setSelectedPlayer(null); setEditingPlayer(false); }} style={{ background: "none", border: "none", color: "#6b7280", fontSize: 24, cursor: "pointer", lineHeight: 1 }}>×</button>
+                  <button onClick={() => { setSelectedPlayer(null); setEditingPlayer(false); }} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 24, cursor: "pointer", lineHeight: 1 }}>×</button>
                 </div>
               ) : (
                 <div style={{ marginBottom: 16 }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
-                    <div style={{ fontWeight: 800, fontSize: 16, color: "#fff" }}>Edit Player</div>
-                    <button onClick={() => { setSelectedPlayer(null); setEditingPlayer(false); }} style={{ background: "none", border: "none", color: "#6b7280", fontSize: 24, cursor: "pointer", lineHeight: 1 }}>×</button>
+                    <div style={{ fontWeight: 800, fontSize: 16, color: T.textBright }}>Edit Player</div>
+                    <button onClick={() => { setSelectedPlayer(null); setEditingPlayer(false); }} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 24, cursor: "pointer", lineHeight: 1 }}>×</button>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 14 }}>
+                    <Avatar name={editName || "?"} size={56} photo={editPhoto} />
+                    <label style={{ ...s.btn("#374151"), marginTop: 0, width: "auto", padding: "8px 16px", display: "inline-block", cursor: "pointer" }}>
+                      📷 {editPhoto ? "Change Photo" : "Add Photo"}
+                      <input type="file" accept="image/*" style={{ display: "none" }} onChange={async (e) => {
+                        const file = e.target.files && e.target.files[0];
+                        if (!file) return;
+                        try {
+                          const dataUrl = await resizeImageToDataUrl(file);
+                          setEditPhoto(dataUrl);
+                        } catch (err) { console.error("Image resize error:", err); }
+                      }} />
+                    </label>
+                    {editPhoto && <button onClick={() => setEditPhoto(null)} style={{ background: "none", border: "none", color: "#ef4444", fontSize: 12, cursor: "pointer", fontWeight: 700 }}>Remove</button>}
                   </div>
                   <div style={{ marginBottom: 12 }}>
                     <label style={s.label}>Full Name</label>
@@ -565,21 +712,21 @@ export default function ChessClub() {
               <>
               {/* Stats grid */}
               <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 16 }}>
-                <div style={{ background: "#0f1117", borderRadius: 10, padding: "12px 8px", textAlign: "center" }}>
+                <div style={{ background: T.bg, borderRadius: 10, padding: "12px 8px", textAlign: "center" }}>
                   <div style={{ fontSize: 20, fontWeight: 800, color: "#f0c040" }}>{stat.pts}</div>
-                  <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5 }}>Points</div>
+                  <div style={{ fontSize: 10, color: T.textMuted, textTransform: "uppercase", letterSpacing: 0.5 }}>Points</div>
                 </div>
-                <div style={{ background: "#0f1117", borderRadius: 10, padding: "12px 8px", textAlign: "center" }}>
+                <div style={{ background: T.bg, borderRadius: 10, padding: "12px 8px", textAlign: "center" }}>
                   <div style={{ fontSize: 20, fontWeight: 800, color: "#22c55e" }}>{stat.w}</div>
-                  <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5 }}>Wins</div>
+                  <div style={{ fontSize: 10, color: T.textMuted, textTransform: "uppercase", letterSpacing: 0.5 }}>Wins</div>
                 </div>
-                <div style={{ background: "#0f1117", borderRadius: 10, padding: "12px 8px", textAlign: "center" }}>
+                <div style={{ background: T.bg, borderRadius: 10, padding: "12px 8px", textAlign: "center" }}>
                   <div style={{ fontSize: 20, fontWeight: 800, color: "#9ca3af" }}>{stat.d}</div>
-                  <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5 }}>Draws</div>
+                  <div style={{ fontSize: 10, color: T.textMuted, textTransform: "uppercase", letterSpacing: 0.5 }}>Draws</div>
                 </div>
-                <div style={{ background: "#0f1117", borderRadius: 10, padding: "12px 8px", textAlign: "center" }}>
+                <div style={{ background: T.bg, borderRadius: 10, padding: "12px 8px", textAlign: "center" }}>
                   <div style={{ fontSize: 20, fontWeight: 800, color: "#ef4444" }}>{stat.l}</div>
-                  <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5 }}>Losses</div>
+                  <div style={{ fontSize: 10, color: T.textMuted, textTransform: "uppercase", letterSpacing: 0.5 }}>Losses</div>
                 </div>
               </div>
 
@@ -600,7 +747,7 @@ export default function ChessClub() {
                     <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderBottom: "1px solid #2a2f3e" }}>
                       <div style={{ width: 28, height: 28, borderRadius: "50%", background: resultColor, color: "#0f1117", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 13, flexShrink: 0 }}>{h.result}</div>
                       <div style={{ flex: 1 }}>
-                        <div style={{ fontSize: 13, color: "#fff", fontWeight: 600 }}>{resultText} vs {h.opponentName}</div>
+                        <div style={{ fontSize: 13, color: T.textBright, fontWeight: 600 }}>{resultText} vs {h.opponentName}</div>
                         <div style={{ fontSize: 11, color: "#6b7280" }}>{h.color === "white" ? "⬜ White" : "⬛ Black"} • {h.date}</div>
                       </div>
                     </div>
@@ -617,9 +764,9 @@ export default function ChessClub() {
                     if (summary.games === 0) return null;
                     return (
                       <div key={opp.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderBottom: "1px solid #2a2f3e" }}>
-                        <Avatar name={opp.name} size={28} />
+                        <Avatar name={opp.name} size={28} photo={opp.photo} />
                         <div style={{ flex: 1 }}>
-                          <div style={{ fontSize: 13, color: "#fff", fontWeight: 600 }}>vs {opp.name}</div>
+                          <div style={{ fontSize: 13, color: T.textBright, fontWeight: 600 }}>vs {opp.name}</div>
                           <div style={{ fontSize: 11, color: "#6b7280" }}>{summary.games} game{summary.games > 1 ? "s" : ""} played</div>
                         </div>
                         <div style={{ display: "flex", gap: 6, fontSize: 12, fontWeight: 700 }}>
@@ -652,6 +799,9 @@ export default function ChessClub() {
           </div>
           <div style={{ display: "flex", alignItems: "center" }}>
             <div style={s.roleBadge}>{isManager ? "👑 Manager" : "👀 Viewer"}</div>
+            <button style={s.themeBtn} onClick={() => setTheme(t => t === "dark" ? "light" : "dark")} title="Toggle theme">
+              {theme === "dark" ? "☀️" : "🌙"}
+            </button>
             <button style={s.logoutBtn} onClick={() => { signOut(auth).catch(() => {}); setRole(null); }}>Logout</button>
           </div>
         </div>
@@ -694,12 +844,123 @@ export default function ChessClub() {
           </div>
         )}
 
+        {/* DASHBOARD */}
+        {tab === "Dashboard" && (
+          <>
+            <div style={{ textAlign: "center", marginBottom: 16 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, letterSpacing: 1, textTransform: "uppercase" }}>Current Season</div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: T.gold }}>🏆 {currentSeasonName}</div>
+            </div>
+
+            {/* Quick stats */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 16 }}>
+              <div style={s.card2}>
+                <div style={{ fontSize: 24, fontWeight: 800, color: "#f0c040" }}>{players.length}</div>
+                <div style={{ fontSize: 11, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5 }}>Players</div>
+              </div>
+              <div style={s.card2}>
+                <div style={{ fontSize: 24, fontWeight: 800, color: "#22c55e" }}>{results.length}</div>
+                <div style={{ fontSize: 11, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5 }}>Matches Played</div>
+              </div>
+              <div style={s.card2}>
+                <div style={{ fontSize: 24, fontWeight: 800, color: "#3b82f6" }}>{pendingMatches.length}</div>
+                <div style={{ fontSize: 11, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5 }}>Upcoming</div>
+              </div>
+            </div>
+
+            {/* Current leader */}
+            {standings.length > 0 && (
+              <div style={{ ...s.card, background: "linear-gradient(135deg, rgba(240,192,64,0.12), rgba(240,192,64,0.03))", border: "1px solid rgba(240,192,64,0.25)" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#f0c040", letterSpacing: 1, textTransform: "uppercase", marginBottom: 10 }}>🥇 Current Leader</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 14, cursor: "pointer" }} onClick={() => setSelectedPlayer(standings[0].id)}>
+                  <Avatar name={standings[0].name} size={48} photo={getPlayerPhoto(standings[0].id)} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 800, fontSize: 17, color: T.textBright }}>{standings[0].name}</div>
+                    <FormBadges form={getForm(standings[0].id)} size={16} />
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ fontSize: 22, fontWeight: 800, color: "#f0c040" }}>{standings[0].pts}</div>
+                    <div style={{ fontSize: 10, color: "#6b7280" }}>points</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Live match */}
+            {startedMatches.length > 0 && (
+              <div style={{ ...s.card, border: "1px solid rgba(34,197,94,0.3)" }}>
+                <div style={s.sectionTitle}><span style={s.liveDot} />Live Now</div>
+                {startedMatches.map(m => (
+                  <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0" }}>
+                    <Avatar name={m.whiteName} size={28} photo={getPlayerPhoto(m.whiteId)} />
+                    <span style={{ fontWeight: 600, fontSize: 13, color: T.textBright }}>{m.whiteName}</span>
+                    <span style={{ color: "#22c55e", fontWeight: 800, fontSize: 12 }}>VS</span>
+                    <Avatar name={m.blackName} size={28} photo={getPlayerPhoto(m.blackId)} />
+                    <span style={{ fontWeight: 600, fontSize: 13, color: T.textBright }}>{m.blackName}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Next match */}
+            <div style={s.card}>
+              <div style={s.sectionTitle}>📅 Next Match</div>
+              {notStartedMatches.length === 0 && <div style={s.empty}>No upcoming matches scheduled.</div>}
+              {notStartedMatches.length > 0 && (() => {
+                const m = notStartedMatches[0];
+                return (
+                  <div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                      <Avatar name={m.whiteName} size={32} photo={getPlayerPhoto(m.whiteId)} />
+                      <span style={{ fontWeight: 600, fontSize: 14, color: T.textBright }}>{m.whiteName}</span>
+                      <span style={{ color: "#f0c040", fontWeight: 800, fontSize: 12 }}>VS</span>
+                      <Avatar name={m.blackName} size={32} photo={getPlayerPhoto(m.blackId)} />
+                      <span style={{ fontWeight: 600, fontSize: 14, color: T.textBright }}>{m.blackName}</span>
+                    </div>
+                    <div style={{ fontSize: 12, color: "#6b7280" }}>📆 {m.date}{m.time ? ` at ${m.time}` : ""}</div>
+                  </div>
+                );
+              })()}
+            </div>
+
+            {/* Recent activity */}
+            <div style={s.card}>
+              <div style={s.sectionTitle}>🕐 Recent Activity</div>
+              {activity.length === 0 && <div style={s.empty}>No activity yet. Add players and matches to get started.</div>}
+              {activity.slice().reverse().slice(0, 10).map(a => (
+                <div key={a.id} style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "8px 0", borderBottom: `1px solid ${T.border}` }}>
+                  <span style={{ fontSize: 16, flexShrink: 0 }}>{a.icon}</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13, color: T.text }}>{a.text}</div>
+                    <div style={{ fontSize: 10, color: T.textMuted, marginTop: 2 }}>{new Date(a.ts).toLocaleString()}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
         {/* PLAYERS */}
         {tab === "Players" && (
           <>
             {isManager && (
               <div style={s.card}>
                 <div style={s.sectionTitle}>Add Player</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 14 }}>
+                  <Avatar name={pName || "?"} size={56} photo={pPhoto} />
+                  <label style={{ ...s.btn("#374151"), marginTop: 0, width: "auto", padding: "8px 16px", display: "inline-block", cursor: "pointer" }}>
+                    📷 {pPhoto ? "Change Photo" : "Add Photo"}
+                    <input type="file" accept="image/*" style={{ display: "none" }} onChange={async (e) => {
+                      const file = e.target.files && e.target.files[0];
+                      if (!file) return;
+                      try {
+                        const dataUrl = await resizeImageToDataUrl(file);
+                        setPPhoto(dataUrl);
+                      } catch (err) { console.error("Image resize error:", err); }
+                    }} />
+                  </label>
+                  {pPhoto && <button onClick={() => setPPhoto(null)} style={{ background: "none", border: "none", color: "#ef4444", fontSize: 12, cursor: "pointer", fontWeight: 700 }}>Remove</button>}
+                </div>
                 <div style={{ marginBottom: 12 }}>
                   <label style={s.label}>Full Name</label>
                   <input style={s.input} placeholder="e.g. Ahmed Hassan" value={pName} onChange={e => setPName(e.target.value)} />
@@ -718,26 +979,44 @@ export default function ChessClub() {
             )}
             <div style={s.card}>
               <div style={s.sectionTitle}>Members ({players.length})</div>
-              {players.length === 0 && <div style={s.empty}>No players yet.{isManager ? " Add your first member above." : ""}</div>}
-              {players.map(p => (
-                <div key={p.id} style={{ ...s.playerRow, cursor: "pointer" }} onClick={() => { setSelectedPlayer(p.id); setEditingPlayer(false); }}>
-                  <Avatar name={p.name} />
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: 600, fontSize: 14, color: "#fff" }}>{p.name}</div>
-                    <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 4 }}>{p.phone || "No phone"}</div>
-                    <FormBadges form={getForm(p.id)} size={18} />
-                  </div>
-                  <Badge text={p.level} color={p.level === "Expert" ? "#7c3aed" : p.level === "Advanced" ? "#b45309" : p.level === "Intermediate" ? "#1d6b4d" : "#374151"} />
-                  {isManager && p.phone && (
-                    <button style={s.waBtn} onClick={(e) => { e.stopPropagation(); sendWA(p.phone.replace(/\D/g, ""), `Hi ${p.name}! 👋 Welcome to ${APP_NAME}!`); }}>
-                      <span>📱</span> Chat
-                    </button>
-                  )}
+              {players.length > 0 && (
+                <div style={{ marginBottom: 14 }}>
+                  <input
+                    style={s.input}
+                    placeholder="🔍 Search players by name or level..."
+                    value={playerSearch}
+                    onChange={e => setPlayerSearch(e.target.value)}
+                  />
                 </div>
-              ))}
+              )}
+              {players.length === 0 && <div style={s.empty}>No players yet.{isManager ? " Add your first member above." : ""}</div>}
+              {(() => {
+                const q = playerSearch.trim().toLowerCase();
+                const filtered = q ? players.filter(p => p.name.toLowerCase().includes(q) || p.level.toLowerCase().includes(q)) : players;
+                if (players.length > 0 && filtered.length === 0) {
+                  return <div style={s.empty}>No players match "{playerSearch}".</div>;
+                }
+                return filtered.map(p => (
+                  <div key={p.id} style={{ ...s.playerRow, cursor: "pointer" }} onClick={() => { setSelectedPlayer(p.id); setEditingPlayer(false); }}>
+                    <Avatar name={p.name} photo={p.photo} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: 14, color: T.textBright }}>{p.name}</div>
+                      <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 4 }}>{p.phone || "No phone"}</div>
+                      <FormBadges form={getForm(p.id)} size={18} />
+                    </div>
+                    <Badge text={p.level} color={p.level === "Expert" ? "#7c3aed" : p.level === "Advanced" ? "#b45309" : p.level === "Intermediate" ? "#1d6b4d" : "#374151"} />
+                    {isManager && p.phone && (
+                      <button style={s.waBtn} onClick={(e) => { e.stopPropagation(); sendWA(p.phone.replace(/\D/g, ""), `Hi ${p.name}! 👋 Welcome to ${APP_NAME}!`); }}>
+                        <span>📱</span> Chat
+                      </button>
+                    )}
+                  </div>
+                ));
+              })()}
             </div>
           </>
         )}
+
 
         {/* SCHEDULE */}
         {tab === "Schedule" && (
@@ -776,11 +1055,11 @@ export default function ChessClub() {
                 {startedMatches.map(m => (
                   <div key={m.id} style={{ padding: "12px 0", borderBottom: "1px solid #2a2f3e" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <Avatar name={m.whiteName} size={30} />
-                      <span style={{ fontWeight: 600, fontSize: 13, color: "#fff" }}>{m.whiteName}</span>
+                      <Avatar name={m.whiteName} size={30} photo={getPlayerPhoto(m.whiteId)} />
+                      <span style={{ fontWeight: 600, fontSize: 13, color: T.textBright }}>{m.whiteName}</span>
                       <span style={{ color: "#22c55e", fontWeight: 800, fontSize: 12 }}>VS</span>
-                      <Avatar name={m.blackName} size={30} />
-                      <span style={{ fontWeight: 600, fontSize: 13, color: "#fff" }}>{m.blackName}</span>
+                      <Avatar name={m.blackName} size={30} photo={getPlayerPhoto(m.blackId)} />
+                      <span style={{ fontWeight: 600, fontSize: 13, color: T.textBright }}>{m.blackName}</span>
                       <div style={{ marginLeft: "auto" }}><Badge text="🟢 LIVE" color="#15532e" /></div>
                     </div>
                   </div>
@@ -793,11 +1072,11 @@ export default function ChessClub() {
               {notStartedMatches.map(m => (
                 <div key={m.id} style={{ padding: "12px 0", borderBottom: "1px solid #2a2f3e" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <Avatar name={m.whiteName} size={30} />
-                    <span style={{ fontWeight: 600, fontSize: 13, color: "#fff" }}>{m.whiteName}</span>
+                    <Avatar name={m.whiteName} size={30} photo={getPlayerPhoto(m.whiteId)} />
+                    <span style={{ fontWeight: 600, fontSize: 13, color: T.textBright }}>{m.whiteName}</span>
                     <span style={{ color: "#f0c040", fontWeight: 800, fontSize: 12 }}>VS</span>
-                    <Avatar name={m.blackName} size={30} />
-                    <span style={{ fontWeight: 600, fontSize: 13, color: "#fff" }}>{m.blackName}</span>
+                    <Avatar name={m.blackName} size={30} photo={getPlayerPhoto(m.blackId)} />
+                    <span style={{ fontWeight: 600, fontSize: 13, color: T.textBright }}>{m.blackName}</span>
                     <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
                       <Badge text={m.date} color="#1d3557" />
                       {isManager && <button style={s.startBtn} onClick={() => startMatch(m.id)}>▶ Start</button>}
@@ -847,7 +1126,7 @@ export default function ChessClub() {
                 return (
                   <div key={i} style={{ padding: "12px 0", borderBottom: "1px solid #2a2f3e", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                     <div>
-                      <div style={{ fontWeight: 600, fontSize: 13, color: "#fff" }}>{m.whiteName} vs {m.blackName}</div>
+                      <div style={{ fontWeight: 600, fontSize: 13, color: T.textBright }}>{m.whiteName} vs {m.blackName}</div>
                       <div style={{ fontSize: 12, color: "#6b7280" }}>{m.date}</div>
                     </div>
                     <Badge text={!winner ? `🤝 Draw (+${PTS.draw}pt)` : `🏆 ${winner} (+${PTS.win}pts)`} color={!winner ? "#374151" : "#b45309"} />
@@ -860,6 +1139,36 @@ export default function ChessClub() {
 
         {/* STANDINGS */}
         {tab === "Standings" && (
+          <>
+            {/* Current season header */}
+            <div style={{ ...s.card, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, letterSpacing: 1, textTransform: "uppercase" }}>Current Season</div>
+                <div style={{ fontSize: 18, fontWeight: 800, color: T.gold }}>🏆 {currentSeasonName}</div>
+              </div>
+              {isManager && standings.length > 0 && (
+                <button style={{ ...s.btn("#374151"), marginTop: 0, width: "auto", padding: "8px 14px", fontSize: 12 }} onClick={() => setShowEndSeasonConfirm(true)}>
+                  🏁 End Season
+                </button>
+              )}
+            </div>
+
+            {/* End season confirmation */}
+            {showEndSeasonConfirm && (
+              <div style={{ ...s.card, border: "1px solid rgba(240,192,64,0.3)" }}>
+                <div style={{ fontWeight: 700, color: T.textBright, marginBottom: 8, fontSize: 14 }}>End "{currentSeasonName}"?</div>
+                <div style={{ fontSize: 12, color: T.textMuted2, marginBottom: 12 }}>
+                  This will save the current standings to history (with {standings[0]?.name} as champion 🏆), then reset matches and results so everyone starts fresh. Players stay in the club.
+                </div>
+                <label style={s.label}>Next Season Name</label>
+                <input style={s.input} placeholder={`Season ${seasons.length + 2}`} value={nextSeasonName} onChange={e => setNextSeasonName(e.target.value)} />
+                <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+                  <button style={{ ...s.btn(), marginTop: 0, flex: 1 }} onClick={endSeason}>✅ Confirm & Start New Season</button>
+                  <button style={{ ...s.btn("#374151"), marginTop: 0, flex: 1 }} onClick={() => setShowEndSeasonConfirm(false)}>Cancel</button>
+                </div>
+              </div>
+            )}
+
           <div style={s.card}>
             <div style={s.sectionTitle}>🏆 Club Standings</div>
             {standings.length === 0 && <div style={s.empty}>Add players and record results to see standings.</div>}
@@ -871,11 +1180,11 @@ export default function ChessClub() {
                     {standings.map((p, i) => (
                       <tr key={p.id} style={{ background: i === 0 ? "rgba(240,192,64,0.07)" : "transparent", cursor: "pointer" }} onClick={() => { setSelectedPlayer(p.id); setEditingPlayer(false); }}>
                         <td style={{ ...s.td, color: i === 0 ? "#f0c040" : "#6b7280", fontWeight: 700 }}>{i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : i + 1}</td>
-                        <td style={{ ...s.td, color: "#fff", fontWeight: 600 }}>{p.name}</td>
+                        <td style={{ ...s.td, color: T.textBright, fontWeight: 600 }}>{p.name}</td>
                         <td style={{ ...s.td, color: "#22c55e" }}>{p.w}</td>
                         <td style={{ ...s.td, color: "#f0c040" }}>{p.d}</td>
                         <td style={{ ...s.td, color: "#ef4444" }}>{p.l}</td>
-                        <td style={{ ...s.td, fontWeight: 800, color: i === 0 ? "#f0c040" : "#e8e6e0" }}>{p.pts}</td>
+                        <td style={{ ...s.td, fontWeight: 800, color: i === 0 ? "#f0c040" : T.text }}>{p.pts}</td>
                         <td style={s.td}><FormBadges form={getForm(p.id)} size={18} /></td>
                       </tr>
                     ))}
@@ -895,6 +1204,27 @@ export default function ChessClub() {
               </>
             )}
           </div>
+
+            {/* Past Seasons / Champions */}
+            {seasons.length > 0 && (
+              <div style={s.card}>
+                <div style={s.sectionTitle}>📜 Past Seasons</div>
+                {seasons.slice().reverse().map(season => (
+                  <div key={season.id} style={{ padding: "12px 0", borderBottom: `1px solid ${T.border}` }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+                      <div style={{ fontWeight: 700, fontSize: 14, color: T.textBright }}>{season.name}</div>
+                      <div style={{ fontSize: 11, color: T.textMuted }}>{new Date(season.endedAt).toLocaleDateString()}</div>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 16 }}>🏆</span>
+                      <span style={{ fontSize: 13, color: T.gold, fontWeight: 700 }}>{season.champion.name}</span>
+                      <span style={{ fontSize: 12, color: T.textMuted }}>— {season.champion.pts} pts</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
