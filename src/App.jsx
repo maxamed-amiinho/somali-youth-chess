@@ -1,4 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from "react";
+import { initializeApp } from "firebase/app";
+import { getFirestore, doc, setDoc, onSnapshot } from "firebase/firestore";
 
 const TABS = ["Players", "Schedule", "Results", "Standings"];
 const MANAGER_EMAIL = "amiinho@gmail.com";
@@ -6,6 +8,22 @@ const MANAGER_PASS = "hooyo2023";
 const PTS = { win: 3, draw: 1, loss: 0 };
 const APP_NAME = "SOMALI YOUTH CHESS";
 const WA_GROUP = "https://chat.whatsapp.com/CTZsNTSWfKwD3nOV64edsM";
+
+// === FIREBASE CONFIG ===
+const firebaseConfig = {
+  apiKey: "AIzaSyASxgwG5rBnVYOcmwejhpt2MpPU-eKFFic",
+  authDomain: "somali-youth-chess.firebaseapp.com",
+  projectId: "somali-youth-chess",
+  storageBucket: "somali-youth-chess.firebasestorage.app",
+  messagingSenderId: "974928971847",
+  appId: "1:974928971847:web:38087c93042fc41f050962",
+};
+
+const firebaseApp = initializeApp(firebaseConfig);
+const db = getFirestore(firebaseApp);
+
+// Single shared document holding all club data
+const CLUB_DOC = doc(db, "chessClub", "data");
 
 function Avatar({ name, size = 36 }) {
   const initials = name.split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase();
@@ -233,6 +251,9 @@ export default function ChessClub() {
   const [matches, setMatches] = useState([]);
   const [results, setResults] = useState([]);
   const [notif, setNotif] = useState(null);
+  const [dbLoaded, setDbLoaded] = useState(false);
+  const [dbError, setDbError] = useState(null);
+  const isLocalUpdate = useRef(false);
 
   const [pName, setPName] = useState("");
   const [pPhone, setPPhone] = useState("");
@@ -244,10 +265,54 @@ export default function ChessClub() {
   const [rMatch, setRMatch] = useState("");
   const [rWinner, setRWinner] = useState("");
   const [selectedPlayer, setSelectedPlayer] = useState(null);
+  const [editingPlayer, setEditingPlayer] = useState(false);
+  const [editName, setEditName] = useState("");
+  const [editPhone, setEditPhone] = useState("");
+  const [editLevel, setEditLevel] = useState("Intermediate");
 
   const isManager = role === "manager";
 
   const showNotif = (type, title, body) => setNotif({ type, title, body, id: Date.now() });
+
+  // === FIRESTORE: Real-time sync ===
+  // Subscribe once to the shared club document. Any change made here (by any user/device)
+  // updates Firestore, and Firestore pushes the new data back to everyone in real time.
+  useEffect(() => {
+    const unsubscribe = onSnapshot(
+      CLUB_DOC,
+      (snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          isLocalUpdate.current = true;
+          setPlayers(data.players || []);
+          setMatches(data.matches || []);
+          setResults(data.results || []);
+        }
+        setDbLoaded(true);
+        setDbError(null);
+      },
+      (err) => {
+        console.error("Firestore error:", err);
+        setDbError(err.message);
+        setDbLoaded(true); // allow app to continue with empty/local data
+      }
+    );
+    return () => unsubscribe();
+  }, []);
+
+  // Whenever players/matches/results change locally, save to Firestore
+  // (skip the very first sync that came FROM Firestore to avoid an extra write loop)
+  useEffect(() => {
+    if (!dbLoaded) return;
+    if (isLocalUpdate.current) {
+      isLocalUpdate.current = false;
+      return;
+    }
+    setDoc(CLUB_DOC, { players, matches, results, updatedAt: Date.now() }).catch((err) => {
+      console.error("Firestore save error:", err);
+      setDbError(err.message);
+    });
+  }, [players, matches, results, dbLoaded]);
 
   const standings = useMemo(() => {
     const map = {};
@@ -324,6 +389,26 @@ export default function ChessClub() {
     setPlayers(p => [...p, player]);
     setPName(""); setPPhone(""); setPLevel("Intermediate");
     showNotif("info", "New Player Added!", `${player.name} joined as ${player.level}`);
+  };
+
+  const startEditPlayer = (player) => {
+    setEditName(player.name);
+    setEditPhone(player.phone || "");
+    setEditLevel(player.level);
+    setEditingPlayer(true);
+  };
+
+  const saveEditPlayer = (playerId) => {
+    if (!editName.trim()) return;
+    const oldPlayer = players.find(p => p.id === playerId);
+    const levelChanged = oldPlayer && oldPlayer.level !== editLevel;
+    setPlayers(prev => prev.map(p => p.id === playerId ? { ...p, name: editName.trim(), phone: editPhone.trim(), level: editLevel } : p));
+    setEditingPlayer(false);
+    if (levelChanged) {
+      showNotif("info", "Player Updated!", `${editName.trim()} is now ${editLevel} (was ${oldPlayer.level})`);
+    } else {
+      showNotif("info", "Player Updated!", `${editName.trim()}'s info was updated`);
+    }
   };
 
   const addMatch = () => {
@@ -410,18 +495,53 @@ export default function ChessClub() {
         const otherPlayers = players.filter(p => p.id !== selectedPlayer);
 
         return (
-          <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", zIndex: 10000, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={() => setSelectedPlayer(null)}>
+          <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", zIndex: 10000, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={() => { setSelectedPlayer(null); setEditingPlayer(false); }}>
             <div style={{ background: "#1a1f2e", border: "1px solid #2a2f3e", borderRadius: "16px 16px 0 0", padding: 24, width: "100%", maxWidth: 640, maxHeight: "85vh", overflowY: "auto" }} onClick={e => e.stopPropagation()}>
               {/* Header */}
-              <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 16 }}>
-                <Avatar name={player.name} size={56} />
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 800, fontSize: 18, color: "#fff" }}>{player.name}</div>
-                  <Badge text={player.level} color={player.level === "Expert" ? "#7c3aed" : player.level === "Advanced" ? "#b45309" : player.level === "Intermediate" ? "#1d6b4d" : "#374151"} />
+              {!editingPlayer ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 16 }}>
+                  <Avatar name={player.name} size={56} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 800, fontSize: 18, color: "#fff" }}>{player.name}</div>
+                    <Badge text={player.level} color={player.level === "Expert" ? "#7c3aed" : player.level === "Advanced" ? "#b45309" : player.level === "Intermediate" ? "#1d6b4d" : "#374151"} />
+                  </div>
+                  {isManager && (
+                    <button onClick={() => startEditPlayer(player)} style={{ background: "rgba(240,192,64,0.12)", border: "1px solid rgba(240,192,64,0.3)", color: "#f0c040", borderRadius: 8, padding: "6px 12px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>✏️ Edit</button>
+                  )}
+                  <button onClick={() => { setSelectedPlayer(null); setEditingPlayer(false); }} style={{ background: "none", border: "none", color: "#6b7280", fontSize: 24, cursor: "pointer", lineHeight: 1 }}>×</button>
                 </div>
-                <button onClick={() => setSelectedPlayer(null)} style={{ background: "none", border: "none", color: "#6b7280", fontSize: 24, cursor: "pointer", lineHeight: 1 }}>×</button>
-              </div>
+              ) : (
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+                    <div style={{ fontWeight: 800, fontSize: 16, color: "#fff" }}>Edit Player</div>
+                    <button onClick={() => { setSelectedPlayer(null); setEditingPlayer(false); }} style={{ background: "none", border: "none", color: "#6b7280", fontSize: 24, cursor: "pointer", lineHeight: 1 }}>×</button>
+                  </div>
+                  <div style={{ marginBottom: 12 }}>
+                    <label style={s.label}>Full Name</label>
+                    <input style={s.input} value={editName} onChange={e => setEditName(e.target.value)} />
+                  </div>
+                  <div style={s.row}>
+                    <div>
+                      <label style={s.label}>WhatsApp Number</label>
+                      <input style={s.input} placeholder="+252..." value={editPhone} onChange={e => setEditPhone(e.target.value)} />
+                    </div>
+                    <div>
+                      <label style={s.label}>Level</label>
+                      <select style={s.select} value={editLevel} onChange={e => setEditLevel(e.target.value)}>
+                        <option>Beginner</option><option>Intermediate</option><option>Advanced</option><option>Expert</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+                    <button style={{ ...s.btn(), marginTop: 0, flex: 1 }} onClick={() => saveEditPlayer(player.id)}>💾 Save Changes</button>
+                    <button style={{ ...s.btn("#374151"), marginTop: 0, flex: 1 }} onClick={() => setEditingPlayer(false)}>Cancel</button>
+                  </div>
+                </div>
+              )}
 
+
+              {!editingPlayer && (
+              <>
               {/* Stats grid */}
               <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 16 }}>
                 <div style={{ background: "#0f1117", borderRadius: 10, padding: "12px 8px", textAlign: "center" }}>
@@ -496,6 +616,8 @@ export default function ChessClub() {
               )}
 
               <button style={{ ...s.btn(), marginTop: 16 }} onClick={() => setSelectedPlayer(null)}>Close</button>
+              </>
+              )}
             </div>
           </div>
         );
@@ -518,6 +640,16 @@ export default function ChessClub() {
       </div>
 
       <div style={s.body}>
+        {!dbLoaded && (
+          <div style={{ background: "rgba(59,130,246,0.1)", border: "1px solid rgba(59,130,246,0.3)", borderRadius: 10, padding: "10px 16px", marginBottom: 16, fontSize: 12, color: "#9ca3af", textAlign: "center" }}>
+            ⏳ Loading club data...
+          </div>
+        )}
+        {dbError && (
+          <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 10, padding: "10px 16px", marginBottom: 16, fontSize: 12, color: "#ef4444" }}>
+            ⚠️ Database connection error: {dbError}. Data may not be saved. Check Firebase config.
+          </div>
+        )}
         <a href={WA_GROUP} target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none", display: "flex", alignItems: "center", gap: 10, background: "rgba(37,211,102,0.1)", border: "1px solid rgba(37,211,102,0.3)", borderRadius: 10, padding: "12px 16px", marginBottom: 16 }}>
           <span style={{ fontSize: 20 }}>💬</span>
           <div style={{ flex: 1 }}>
@@ -567,7 +699,7 @@ export default function ChessClub() {
               <div style={s.sectionTitle}>Members ({players.length})</div>
               {players.length === 0 && <div style={s.empty}>No players yet.{isManager ? " Add your first member above." : ""}</div>}
               {players.map(p => (
-                <div key={p.id} style={{ ...s.playerRow, cursor: "pointer" }} onClick={() => setSelectedPlayer(p.id)}>
+                <div key={p.id} style={{ ...s.playerRow, cursor: "pointer" }} onClick={() => { setSelectedPlayer(p.id); setEditingPlayer(false); }}>
                   <Avatar name={p.name} />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontWeight: 600, fontSize: 14, color: "#fff" }}>{p.name}</div>
@@ -716,7 +848,7 @@ export default function ChessClub() {
                   <thead><tr><th style={s.th}>#</th><th style={s.th}>Player</th><th style={s.th}>W</th><th style={s.th}>D</th><th style={s.th}>L</th><th style={s.th}>Pts</th><th style={s.th}>Form</th></tr></thead>
                   <tbody>
                     {standings.map((p, i) => (
-                      <tr key={p.id} style={{ background: i === 0 ? "rgba(240,192,64,0.07)" : "transparent", cursor: "pointer" }} onClick={() => setSelectedPlayer(p.id)}>
+                      <tr key={p.id} style={{ background: i === 0 ? "rgba(240,192,64,0.07)" : "transparent", cursor: "pointer" }} onClick={() => { setSelectedPlayer(p.id); setEditingPlayer(false); }}>
                         <td style={{ ...s.td, color: i === 0 ? "#f0c040" : "#6b7280", fontWeight: 700 }}>{i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : i + 1}</td>
                         <td style={{ ...s.td, color: "#fff", fontWeight: 600 }}>{p.name}</td>
                         <td style={{ ...s.td, color: "#22c55e" }}>{p.w}</td>
