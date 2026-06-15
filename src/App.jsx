@@ -3,7 +3,7 @@ import { initializeApp } from "firebase/app";
 import { getFirestore, doc, setDoc, onSnapshot } from "firebase/firestore";
 import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "firebase/auth";
 
-const TABS = ["Dashboard", "Players", "Schedule", "Results", "Standings"];
+const TABS = ["Dashboard", "Players", "Schedule", "Results", "Standings", "Tournament"];
 const MANAGER_EMAIL = "amiinho@gmail.com";
 const PTS = { win: 3, draw: 1, loss: 0 };
 const APP_NAME = "SOMALI YOUTH CHESS";
@@ -338,6 +338,9 @@ export default function ChessClub() {
   const [currentSeasonName, setCurrentSeasonName] = useState("Season 1");
   const [showEndSeasonConfirm, setShowEndSeasonConfirm] = useState(false);
   const [nextSeasonName, setNextSeasonName] = useState("");
+  const [tournament, setTournament] = useState(null); // { id, name, rounds: [[match,...],...], champion }
+  const [tournamentName, setTournamentName] = useState("");
+  const [tournamentSelected, setTournamentSelected] = useState([]); // player ids chosen for new bracket
   const [dbLoaded, setDbLoaded] = useState(false);
   const [dbError, setDbError] = useState(null);
   const isLocalUpdate = useRef(false);
@@ -396,6 +399,7 @@ export default function ChessClub() {
           setActivity(data.activity || []);
           setSeasons(data.seasons || []);
           setCurrentSeasonName(data.currentSeasonName || "Season 1");
+          setTournament(data.tournament || null);
         }
         setDbLoaded(true);
         setDbError(null);
@@ -417,11 +421,11 @@ export default function ChessClub() {
       isLocalUpdate.current = false;
       return;
     }
-    setDoc(CLUB_DOC, { players, matches, results, activity, seasons, currentSeasonName, updatedAt: Date.now() }).catch((err) => {
+    setDoc(CLUB_DOC, { players, matches, results, activity, seasons, currentSeasonName, tournament, updatedAt: Date.now() }).catch((err) => {
       console.error("Firestore save error:", err);
       setDbError(err.message);
     });
-  }, [players, matches, results, activity, seasons, currentSeasonName, dbLoaded]);
+  }, [players, matches, results, activity, seasons, currentSeasonName, tournament, dbLoaded]);
 
   const standings = useMemo(() => {
     const map = {};
@@ -586,6 +590,105 @@ export default function ChessClub() {
     setShowEndSeasonConfirm(false);
     showNotif("end", "🏆 Season Ended!", `${champion.name} won ${seasonRecord.name} with ${champion.pts} pts! ${newName} has begun.`);
     logActivity("🏆", `${seasonRecord.name} ended — Champion: ${champion.name} (${champion.pts} pts). ${newName} begins!`);
+  };
+
+  // === TOURNAMENT BRACKET (casual knockout, separate from League) ===
+  // Build a single-elimination bracket from a shuffled list of players.
+  // Byes (auto-advance) are given to players when the count isn't a power of two.
+  const startTournament = () => {
+    if (tournamentSelected.length < 2) return;
+    const chosen = players.filter(p => tournamentSelected.includes(p.id));
+    // Shuffle
+    const shuffled = [...chosen];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    // Build round 1 pairs (last player gets a bye if odd count)
+    const round1 = [];
+    for (let i = 0; i < shuffled.length; i += 2) {
+      const p1 = shuffled[i];
+      const p2 = shuffled[i + 1] || null; // bye if no partner
+      round1.push({
+        id: `r0m${i / 2}`,
+        p1: { id: p1.id, name: p1.name, photo: p1.photo || null },
+        p2: p2 ? { id: p2.id, name: p2.name, photo: p2.photo || null } : null,
+        winner: p2 ? null : "p1", // auto-advance on bye
+      });
+    }
+    const newTournament = {
+      id: Date.now(),
+      name: tournamentName.trim() || "Friendly Knockout",
+      rounds: [round1],
+      champion: null,
+    };
+    setTournament(newTournament);
+    setTournamentName("");
+    setTournamentSelected([]);
+    showNotif("info", "🎉 Tournament Started!", `${newTournament.name} — ${chosen.length} players`);
+    logActivity("🎉", `Tournament started: ${newTournament.name} (${chosen.length} players)`);
+  };
+
+  // Record a winner for a bracket match, then build the next round once the current round is complete
+  const setBracketWinner = (roundIdx, matchIdx, winnerKey) => {
+    setTournament(prev => {
+      if (!prev) return prev;
+      const rounds = prev.rounds.map(r => r.map(m => ({ ...m })));
+      rounds[roundIdx][matchIdx].winner = winnerKey;
+
+      const round = rounds[roundIdx];
+      const allDecided = round.every(m => m.winner);
+      let champion = prev.champion;
+
+      if (allDecided) {
+        const winners = round.map(m => m.winner === "p1" ? m.p1 : m.p2);
+        if (winners.length === 1) {
+          champion = winners[0];
+        } else if (!rounds[roundIdx + 1]) {
+          const nextRound = [];
+          for (let i = 0; i < winners.length; i += 2) {
+            const p1 = winners[i];
+            const p2 = winners[i + 1] || null;
+            nextRound.push({
+              id: `r${roundIdx + 1}m${i / 2}`,
+              p1, p2,
+              winner: p2 ? null : "p1",
+            });
+          }
+          rounds.push(nextRound);
+          // If the auto-created round is itself fully decided (e.g. all byes), recurse handled on next render via effect-less check
+          if (nextRound.length === 1 && nextRound[0].winner) {
+            champion = nextRound[0].winner === "p1" ? nextRound[0].p1 : nextRound[0].p2;
+          }
+        }
+      }
+
+      const updated = { ...prev, rounds, champion };
+      if (champion && !prev.champion) {
+        showNotif("end", "🏆 Tournament Champion!", `${champion.name} won ${prev.name}!`);
+        logActivity("🏆", `${champion.name} won the tournament "${prev.name}"!`);
+      }
+      return updated;
+    });
+  };
+
+  const endTournament = () => {
+    setTournament(null);
+    setTournamentSelected([]);
+    setTournamentName("");
+  };
+
+  // Standard knockout round names based on how many matches are in the round
+  // (i.e. how many players are competing in that round = matchCount * 2)
+  const getRoundName = (matchCount) => {
+    switch (matchCount) {
+      case 1: return "Final";
+      case 2: return "Semi-Finals";
+      case 4: return "Quarter-Finals";
+      case 8: return "Round of 16";
+      case 16: return "Round of 32";
+      default: return "Group Stage";
+    }
   };
 
   if (!role) return <LoginScreen onLogin={setRole} />;
@@ -1223,6 +1326,141 @@ export default function ChessClub() {
                   </div>
                 ))}
               </div>
+            )}
+          </>
+        )}
+
+        {/* TOURNAMENT (casual knockout, separate from League) */}
+        {tab === "Tournament" && (
+          <>
+            <div style={{ background: "rgba(124,58,237,0.08)", border: "1px solid rgba(124,58,237,0.25)", borderRadius: 10, padding: "12px 16px", marginBottom: 16, fontSize: 12, color: T.textMuted2 }}>
+              🎉 <strong style={{ color: "#a78bfa" }}>For Fun!</strong> Tournament results don't affect League Standings or points — just for casual knockout games between matches.
+            </div>
+
+            {!tournament && (
+              <div style={s.card}>
+                <div style={s.sectionTitle}>🎉 New Tournament</div>
+                {!isManager && <div style={s.empty}>No tournament running. Ask the manager to start one!</div>}
+                {isManager && (
+                  <>
+                    {players.length < 2 ? (
+                      <div style={s.empty}>Add at least 2 players first.</div>
+                    ) : (
+                      <>
+                        <div style={{ marginBottom: 12 }}>
+                          <label style={s.label}>Tournament Name</label>
+                          <input style={s.input} placeholder="e.g. Friday Knockout" value={tournamentName} onChange={e => setTournamentName(e.target.value)} />
+                        </div>
+                        <label style={s.label}>Select Players ({tournamentSelected.length} selected)</label>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+                          {players.map(p => {
+                            const selected = tournamentSelected.includes(p.id);
+                            return (
+                              <button
+                                key={p.id}
+                                onClick={() => setTournamentSelected(prev => selected ? prev.filter(id => id !== p.id) : [...prev, p.id])}
+                                style={{
+                                  display: "flex", alignItems: "center", gap: 6,
+                                  background: selected ? "rgba(124,58,237,0.15)" : T.bg,
+                                  border: `1px solid ${selected ? "#7c3aed" : T.border}`,
+                                  borderRadius: 20, padding: "6px 12px", cursor: "pointer",
+                                  color: selected ? "#a78bfa" : T.text, fontSize: 12, fontWeight: 600
+                                }}
+                              >
+                                <Avatar name={p.name} size={20} photo={p.photo} />
+                                {p.name}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <button style={{ ...s.btn("#7c3aed"), opacity: tournamentSelected.length < 2 ? 0.5 : 1, cursor: tournamentSelected.length < 2 ? "not-allowed" : "pointer" }} disabled={tournamentSelected.length < 2} onClick={startTournament}>
+                          🎉 Start Tournament ({tournamentSelected.length} players)
+                        </button>
+                        {tournamentSelected.length === 1 && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6, textAlign: "center" }}>Select at least 2 players.</div>}
+                      </>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+
+            {tournament && (
+              <>
+                <div style={{ ...s.card, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, letterSpacing: 1, textTransform: "uppercase" }}>Tournament</div>
+                    <div style={{ fontSize: 18, fontWeight: 800, color: "#a78bfa" }}>🎉 {tournament.name}</div>
+                  </div>
+                  {isManager && (
+                    <button style={{ ...s.btn("#374151"), marginTop: 0, width: "auto", padding: "8px 14px", fontSize: 12 }} onClick={endTournament}>
+                      ✕ End
+                    </button>
+                  )}
+                </div>
+
+                {tournament.champion && (
+                  <div style={{ ...s.card, background: "linear-gradient(135deg, rgba(124,58,237,0.15), rgba(124,58,237,0.03))", border: "1px solid rgba(124,58,237,0.3)", textAlign: "center" }}>
+                    <div style={{ fontSize: 12, color: "#a78bfa", fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", marginBottom: 10 }}>🏆 Champion</div>
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+                      <Avatar name={tournament.champion.name} size={56} photo={tournament.champion.photo} />
+                      <div style={{ fontSize: 20, fontWeight: 800, color: T.textBright }}>{tournament.champion.name}</div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Bracket rounds */}
+                {tournament.rounds.map((round, ri) => (
+                  <div key={ri} style={s.card}>
+                    <div style={s.sectionTitle}>
+                      {ri === tournament.rounds.length - 1 && tournament.champion
+                        ? "🏆 Final"
+                        : getRoundName(round.length)}
+                    </div>
+                    {round.map((m, mi) => {
+                      const p1Done = !!m.p1, p2Done = !!m.p2;
+                      const isBye = p1Done && !p2Done;
+                      return (
+                        <div key={m.id} style={{ border: `1px solid ${T.border}`, borderRadius: 10, padding: 10, marginBottom: 10 }}>
+                          {/* Player 1 */}
+                          <div
+                            onClick={() => isManager && p1Done && p2Done && !m.winner && setBracketWinner(ri, mi, "p1")}
+                            style={{
+                              display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 8,
+                              background: m.winner === "p1" ? "rgba(34,197,94,0.1)" : "transparent",
+                              cursor: (isManager && p2Done && !m.winner) ? "pointer" : "default",
+                              opacity: m.winner === "p2" ? 0.4 : 1,
+                            }}
+                          >
+                            {p1Done ? <Avatar name={m.p1.name} size={28} photo={m.p1.photo} /> : <div style={{ width: 28, height: 28, borderRadius: "50%", border: `1px dashed ${T.border}` }} />}
+                            <span style={{ fontSize: 13, fontWeight: 600, color: p1Done ? T.text : T.textMuted, flex: 1 }}>{p1Done ? m.p1.name : "TBD"}</span>
+                            {m.winner === "p1" && <span style={{ fontSize: 16 }}>✅</span>}
+                          </div>
+                          <div style={{ textAlign: "center", fontSize: 11, color: T.textMuted, fontWeight: 700, padding: "2px 0" }}>
+                            {isBye ? "BYE — auto advances" : "vs"}
+                          </div>
+                          {/* Player 2 */}
+                          <div
+                            onClick={() => isManager && p1Done && p2Done && !m.winner && setBracketWinner(ri, mi, "p2")}
+                            style={{
+                              display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 8,
+                              background: m.winner === "p2" ? "rgba(34,197,94,0.1)" : "transparent",
+                              cursor: (isManager && p2Done && !m.winner) ? "pointer" : "default",
+                              opacity: m.winner === "p1" ? 0.4 : 1,
+                            }}
+                          >
+                            {p2Done ? <Avatar name={m.p2.name} size={28} photo={m.p2.photo} /> : <div style={{ width: 28, height: 28, borderRadius: "50%", border: `1px dashed ${T.border}` }} />}
+                            <span style={{ fontSize: 13, fontWeight: 600, color: p2Done ? T.text : T.textMuted, flex: 1 }}>{p2Done ? m.p2.name : (isBye ? "—" : "TBD")}</span>
+                            {m.winner === "p2" && <span style={{ fontSize: 16 }}>✅</span>}
+                          </div>
+                          {isManager && p1Done && p2Done && !m.winner && (
+                            <div style={{ fontSize: 10, color: T.textMuted, textAlign: "center", marginTop: 6 }}>Tap a player to advance them</div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
+              </>
             )}
           </>
         )}
