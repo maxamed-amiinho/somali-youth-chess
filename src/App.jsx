@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import { initializeApp } from "firebase/app";
 import { getFirestore, doc, setDoc, onSnapshot } from "firebase/firestore";
 import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "firebase/auth";
@@ -132,6 +132,29 @@ function resizeImageToDataUrl(file, maxSize = 128, quality = 0.8) {
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
+}
+
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: 20, background: "#1a1f2e", color: "#ef4444", fontFamily: "monospace", fontSize: 12, whiteSpace: "pre-wrap", borderRadius: 8, margin: 16, border: "1px solid #ef4444" }}>
+          <strong>Render Error:</strong>{"\n"}
+          {String(this.state.error && this.state.error.message)}
+          {"\n\n"}
+          {String(this.state.error && this.state.error.stack)}
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 function LoginScreen({ onLogin }) {
@@ -1332,6 +1355,7 @@ export default function ChessClub() {
 
         {/* TOURNAMENT (casual knockout, separate from League) */}
         {tab === "Tournament" && (
+          <ErrorBoundary>
           <>
             <div style={{ background: "rgba(124,58,237,0.08)", border: "1px solid rgba(124,58,237,0.25)", borderRadius: 10, padding: "12px 16px", marginBottom: 16, fontSize: 12, color: T.textMuted2 }}>
               🎉 <strong style={{ color: "#a78bfa" }}>For Fun!</strong> Tournament results don't affect League Standings or points — just for casual knockout games between matches.
@@ -1463,6 +1487,7 @@ export default function ChessClub() {
               </>
             )}
           </>
+          </ErrorBoundary>
         )}
       </div>
     </div>
