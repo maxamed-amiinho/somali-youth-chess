@@ -1,9 +1,9 @@
-import React, { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { initializeApp } from "firebase/app";
 import { getFirestore, doc, setDoc, onSnapshot } from "firebase/firestore";
 import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "firebase/auth";
 
-const TABS = ["Dashboard", "Players", "Schedule", "Results", "Standings", "Tournament"];
+const TABS = ["Dashboard", "Players", "Schedule", "Results", "Standings"];
 const MANAGER_EMAIL = "amiinho@gmail.com";
 const PTS = { win: 3, draw: 1, loss: 0 };
 const APP_NAME = "SOMALI YOUTH CHESS";
@@ -132,29 +132,6 @@ function resizeImageToDataUrl(file, maxSize = 128, quality = 0.8) {
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
-}
-
-class ErrorBoundary extends React.Component {
-  constructor(props) {
-    super(props);
-    this.state = { error: null };
-  }
-  static getDerivedStateFromError(error) {
-    return { error };
-  }
-  render() {
-    if (this.state.error) {
-      return (
-        <div style={{ padding: 20, background: "#1a1f2e", color: "#ef4444", fontFamily: "monospace", fontSize: 12, whiteSpace: "pre-wrap", borderRadius: 8, margin: 16, border: "1px solid #ef4444" }}>
-          <strong>Render Error:</strong>{"\n"}
-          {String(this.state.error && this.state.error.message)}
-          {"\n\n"}
-          {String(this.state.error && this.state.error.stack)}
-        </div>
-      );
-    }
-    return this.props.children;
-  }
 }
 
 function LoginScreen({ onLogin }) {
@@ -360,10 +337,8 @@ export default function ChessClub() {
   const [seasons, setSeasons] = useState([]); // [{ id, name, endedAt, standings, activity }]
   const [currentSeasonName, setCurrentSeasonName] = useState("Season 1");
   const [showEndSeasonConfirm, setShowEndSeasonConfirm] = useState(false);
+  const [selectedSeason, setSelectedSeason] = useState(null);
   const [nextSeasonName, setNextSeasonName] = useState("");
-  const [tournament, setTournament] = useState(null); // { id, name, rounds: [[match,...],...], champion }
-  const [tournamentName, setTournamentName] = useState("");
-  const [tournamentSelected, setTournamentSelected] = useState([]); // player ids chosen for new bracket
   const [dbLoaded, setDbLoaded] = useState(false);
   const [dbError, setDbError] = useState(null);
   const isLocalUpdate = useRef(false);
@@ -422,7 +397,6 @@ export default function ChessClub() {
           setActivity(data.activity || []);
           setSeasons(data.seasons || []);
           setCurrentSeasonName(data.currentSeasonName || "Season 1");
-          setTournament(data.tournament || null);
         }
         setDbLoaded(true);
         setDbError(null);
@@ -444,11 +418,11 @@ export default function ChessClub() {
       isLocalUpdate.current = false;
       return;
     }
-    setDoc(CLUB_DOC, { players, matches, results, activity, seasons, currentSeasonName, tournament, updatedAt: Date.now() }).catch((err) => {
+    setDoc(CLUB_DOC, { players, matches, results, activity, seasons, currentSeasonName, updatedAt: Date.now() }).catch((err) => {
       console.error("Firestore save error:", err);
       setDbError(err.message);
     });
-  }, [players, matches, results, activity, seasons, currentSeasonName, tournament, dbLoaded]);
+  }, [players, matches, results, activity, seasons, currentSeasonName, dbLoaded]);
 
   const standings = useMemo(() => {
     const map = {};
@@ -562,6 +536,29 @@ export default function ChessClub() {
     }
   };
 
+  const deletePlayer = (playerId) => {
+    const player = players.find(p => p.id === playerId);
+    if (!player) return;
+    setPlayers(prev => prev.filter(p => p.id !== playerId));
+    // Also remove any matches and results involving this player
+    const affectedMatchIds = matches.filter(m => m.whiteId === playerId || m.blackId === playerId).map(m => m.id);
+    setMatches(prev => prev.filter(m => m.whiteId !== playerId && m.blackId !== playerId));
+    setResults(prev => prev.filter(r => !affectedMatchIds.includes(r.matchId)));
+    setSelectedPlayer(null);
+    setEditingPlayer(false);
+    showNotif("info", "Player Removed", `${player.name} has been removed from the club.`);
+    logActivity("🗑️", `${player.name} was removed from the club`);
+  };
+
+  const cancelMatch = (matchId) => {
+    const match = matches.find(m => m.id === matchId);
+    if (!match) return;
+    setMatches(prev => prev.filter(m => m.id !== matchId));
+    setResults(prev => prev.filter(r => r.matchId !== matchId));
+    showNotif("info", "Match Cancelled", `${match.whiteName} vs ${match.blackName} has been cancelled.`);
+    logActivity("❌", `Match cancelled: ${match.whiteName} vs ${match.blackName}`);
+  };
+
   const addMatch = () => {
     if (!mWhite || !mBlack || !mDate) return;
     const w = players.find(p => p.id === +mWhite);
@@ -615,105 +612,6 @@ export default function ChessClub() {
     logActivity("🏆", `${seasonRecord.name} ended — Champion: ${champion.name} (${champion.pts} pts). ${newName} begins!`);
   };
 
-  // === TOURNAMENT BRACKET (casual knockout, separate from League) ===
-  // Build a single-elimination bracket from a shuffled list of players.
-  // Byes (auto-advance) are given to players when the count isn't a power of two.
-  const startTournament = () => {
-    if (tournamentSelected.length < 2) return;
-    const chosen = players.filter(p => tournamentSelected.includes(p.id));
-    // Shuffle
-    const shuffled = [...chosen];
-    for (let i = shuffled.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-    }
-    // Build round 1 pairs (last player gets a bye if odd count)
-    const round1 = [];
-    for (let i = 0; i < shuffled.length; i += 2) {
-      const p1 = shuffled[i];
-      const p2 = shuffled[i + 1] || null; // bye if no partner
-      round1.push({
-        id: `r0m${i / 2}`,
-        p1: { id: p1.id, name: p1.name, photo: p1.photo || null },
-        p2: p2 ? { id: p2.id, name: p2.name, photo: p2.photo || null } : null,
-        winner: p2 ? null : "p1", // auto-advance on bye
-      });
-    }
-    const newTournament = {
-      id: Date.now(),
-      name: tournamentName.trim() || "Friendly Knockout",
-      rounds: [round1],
-      champion: null,
-    };
-    setTournament(newTournament);
-    setTournamentName("");
-    setTournamentSelected([]);
-    showNotif("info", "🎉 Tournament Started!", `${newTournament.name} — ${chosen.length} players`);
-    logActivity("🎉", `Tournament started: ${newTournament.name} (${chosen.length} players)`);
-  };
-
-  // Record a winner for a bracket match, then build the next round once the current round is complete
-  const setBracketWinner = (roundIdx, matchIdx, winnerKey) => {
-    setTournament(prev => {
-      if (!prev) return prev;
-      const rounds = prev.rounds.map(r => r.map(m => ({ ...m })));
-      rounds[roundIdx][matchIdx].winner = winnerKey;
-
-      const round = rounds[roundIdx];
-      const allDecided = round.every(m => m.winner);
-      let champion = prev.champion;
-
-      if (allDecided) {
-        const winners = round.map(m => m.winner === "p1" ? m.p1 : m.p2);
-        if (winners.length === 1) {
-          champion = winners[0];
-        } else if (!rounds[roundIdx + 1]) {
-          const nextRound = [];
-          for (let i = 0; i < winners.length; i += 2) {
-            const p1 = winners[i];
-            const p2 = winners[i + 1] || null;
-            nextRound.push({
-              id: `r${roundIdx + 1}m${i / 2}`,
-              p1, p2,
-              winner: p2 ? null : "p1",
-            });
-          }
-          rounds.push(nextRound);
-          // If the auto-created round is itself fully decided (e.g. all byes), recurse handled on next render via effect-less check
-          if (nextRound.length === 1 && nextRound[0].winner) {
-            champion = nextRound[0].winner === "p1" ? nextRound[0].p1 : nextRound[0].p2;
-          }
-        }
-      }
-
-      const updated = { ...prev, rounds, champion };
-      if (champion && !prev.champion) {
-        showNotif("end", "🏆 Tournament Champion!", `${champion.name} won ${prev.name}!`);
-        logActivity("🏆", `${champion.name} won the tournament "${prev.name}"!`);
-      }
-      return updated;
-    });
-  };
-
-  const endTournament = () => {
-    setTournament(null);
-    setTournamentSelected([]);
-    setTournamentName("");
-  };
-
-  // Standard knockout round names based on how many matches are in the round
-  // (i.e. how many players are competing in that round = matchCount * 2)
-  const getRoundName = (matchCount) => {
-    switch (matchCount) {
-      case 1: return "Final";
-      case 2: return "Semi-Finals";
-      case 4: return "Quarter-Finals";
-      case 8: return "Round of 16";
-      case 16: return "Round of 32";
-      default: return "Group Stage";
-    }
-  };
-
   if (!role) return <LoginScreen onLogin={setRole} />;
 
   const pendingMatches = matches.filter(m => !results.find(r => r.matchId === m.id));
@@ -763,6 +661,62 @@ export default function ChessClub() {
             Taabo oo hayso sawirka si aad u kaydiso, ka dibna isaga xidh.
           </div>
           <button style={{ marginTop: 12, background: "#f0c040", color: "#0f1117", border: "none", borderRadius: 8, padding: "10px 24px", fontWeight: 700, fontSize: 13, cursor: "pointer" }} onClick={() => setImgModal(null)}>Close</button>
+        </div>
+      )}
+
+      {/* Season Full Standings Modal */}
+      {selectedSeason && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", zIndex: 10000, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={() => setSelectedSeason(null)}>
+          <div style={{ background: T.bgCard, border: `1px solid ${T.border}`, borderRadius: "16px 16px 0 0", padding: 24, width: "100%", maxWidth: 640, maxHeight: "85vh", overflowY: "auto" }} onClick={e => e.stopPropagation()}>
+            {/* Header */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+              <div style={{ fontWeight: 800, fontSize: 18, color: T.textBright }}>📜 {selectedSeason.name}</div>
+              <button onClick={() => setSelectedSeason(null)} style={{ background: "none", border: "none", color: T.textMuted, fontSize: 24, cursor: "pointer", lineHeight: 1 }}>×</button>
+            </div>
+            <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 16 }}>
+              Ended: {new Date(selectedSeason.endedAt).toLocaleDateString()}
+            </div>
+
+            {/* Champion banner */}
+            <div style={{ background: "rgba(240,192,64,0.08)", border: "1px solid rgba(240,192,64,0.2)", borderRadius: 10, padding: "12px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ fontSize: 24 }}>🏆</span>
+              <div>
+                <div style={{ fontSize: 11, color: T.textMuted, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase" }}>Champion</div>
+                <div style={{ fontSize: 16, fontWeight: 800, color: T.gold }}>{selectedSeason.champion.name}</div>
+                <div style={{ fontSize: 12, color: T.textMuted }}>{selectedSeason.champion.pts} points</div>
+              </div>
+            </div>
+
+            {/* Full standings table */}
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  <th style={s.th}>#</th>
+                  <th style={s.th}>Player</th>
+                  <th style={s.th}>W</th>
+                  <th style={s.th}>D</th>
+                  <th style={s.th}>L</th>
+                  <th style={s.th}>Pts</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(selectedSeason.standings || []).map((p, i) => (
+                  <tr key={p.id || i} style={{ background: i === 0 ? "rgba(240,192,64,0.07)" : "transparent" }}>
+                    <td style={{ ...s.td, color: i === 0 ? T.gold : T.textMuted, fontWeight: 700 }}>
+                      {i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : i + 1}
+                    </td>
+                    <td style={{ ...s.td, color: T.textBright, fontWeight: 600 }}>{p.name}</td>
+                    <td style={{ ...s.td, color: "#22c55e" }}>{p.w}</td>
+                    <td style={{ ...s.td, color: T.gold }}>{p.d}</td>
+                    <td style={{ ...s.td, color: "#ef4444" }}>{p.l}</td>
+                    <td style={{ ...s.td, fontWeight: 800, color: i === 0 ? T.gold : T.text }}>{p.pts}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            <button style={{ ...s.btn(), marginTop: 16 }} onClick={() => setSelectedSeason(null)}>Close</button>
+          </div>
         </div>
       )}
 
@@ -909,7 +863,19 @@ export default function ChessClub() {
                 </div>
               )}
 
-              <button style={{ ...s.btn(), marginTop: 16 }} onClick={() => setSelectedPlayer(null)}>Close</button>
+              {isManager && (
+                <button
+                  style={{ ...s.btn("#ef4444"), marginTop: 8 }}
+                  onClick={() => {
+                    if (window.confirm(`Remove ${player.name} from the club? This will also cancel their matches.`)) {
+                      deletePlayer(player.id);
+                    }
+                  }}
+                >
+                  🗑️ Remove Player
+                </button>
+              )}
+              <button style={{ ...s.btn(), marginTop: 8 }} onClick={() => setSelectedPlayer(null)}>Close</button>
               </>
               )}
             </div>
@@ -1049,20 +1015,22 @@ export default function ChessClub() {
               })()}
             </div>
 
-            {/* Recent activity */}
-            <div style={s.card}>
-              <div style={s.sectionTitle}>🕐 Recent Activity</div>
-              {activity.length === 0 && <div style={s.empty}>No activity yet. Add players and matches to get started.</div>}
-              {activity.slice().reverse().slice(0, 10).map(a => (
-                <div key={a.id} style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "8px 0", borderBottom: `1px solid ${T.border}` }}>
-                  <span style={{ fontSize: 16, flexShrink: 0 }}>{a.icon}</span>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 13, color: T.text }}>{a.text}</div>
-                    <div style={{ fontSize: 10, color: T.textMuted, marginTop: 2 }}>{new Date(a.ts).toLocaleString()}</div>
+            {/* Recent activity — Manager only */}
+            {isManager && (
+              <div style={s.card}>
+                <div style={s.sectionTitle}>🕐 Recent Activity</div>
+                {activity.length === 0 && <div style={s.empty}>No activity yet. Add players and matches to get started.</div>}
+                {activity.slice().reverse().slice(0, 10).map(a => (
+                  <div key={a.id} style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "8px 0", borderBottom: `1px solid ${T.border}` }}>
+                    <span style={{ fontSize: 16, flexShrink: 0 }}>{a.icon}</span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13, color: T.text }}>{a.text}</div>
+                      <div style={{ fontSize: 10, color: T.textMuted, marginTop: 2 }}>{new Date(a.ts).toLocaleString()}</div>
+                    </div>
                   </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </>
         )}
 
@@ -1205,7 +1173,19 @@ export default function ChessClub() {
                     <span style={{ fontWeight: 600, fontSize: 13, color: T.textBright }}>{m.blackName}</span>
                     <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
                       <Badge text={m.date} color="#1d3557" />
-                      {isManager && <button style={s.startBtn} onClick={() => startMatch(m.id)}>▶ Start</button>}
+                      {isManager && (
+                        <div style={{ display: "flex", gap: 6 }}>
+                          <button style={s.startBtn} onClick={() => startMatch(m.id)}>▶ Start</button>
+                          <button
+                            style={{ ...s.startBtn, background: "#ef4444" }}
+                            onClick={() => {
+                              if (window.confirm(`Cancel match: ${m.whiteName} vs ${m.blackName}?`)) {
+                                cancelMatch(m.id);
+                              }
+                            }}
+                          >✕ Cancel</button>
+                        </div>
+                      )}
                     </div>
                   </div>
                   {m.time && <div style={{ fontSize: 12, color: "#6b7280", marginTop: 4 }}>🕐 {m.time}</div>}
@@ -1336,10 +1316,15 @@ export default function ChessClub() {
               <div style={s.card}>
                 <div style={s.sectionTitle}>📜 Past Seasons</div>
                 {seasons.slice().reverse().map(season => (
-                  <div key={season.id} style={{ padding: "12px 0", borderBottom: `1px solid ${T.border}` }}>
+                  <div key={season.id}
+                    onClick={() => setSelectedSeason(season)}
+                    style={{ padding: "12px 0", borderBottom: `1px solid ${T.border}`, cursor: "pointer" }}>
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
                       <div style={{ fontWeight: 700, fontSize: 14, color: T.textBright }}>{season.name}</div>
-                      <div style={{ fontSize: 11, color: T.textMuted }}>{new Date(season.endedAt).toLocaleDateString()}</div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <div style={{ fontSize: 11, color: T.textMuted }}>{new Date(season.endedAt).toLocaleDateString()}</div>
+                        <div style={{ fontSize: 10, color: T.gold, fontWeight: 700, border: `1px solid ${T.gold}`, borderRadius: 4, padding: "2px 6px" }}>Full Table →</div>
+                      </div>
                     </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <span style={{ fontSize: 16 }}>🏆</span>
@@ -1353,142 +1338,6 @@ export default function ChessClub() {
           </>
         )}
 
-        {/* TOURNAMENT (casual knockout, separate from League) */}
-        {tab === "Tournament" && (
-          <ErrorBoundary>
-          <>
-            <div style={{ background: "rgba(124,58,237,0.08)", border: "1px solid rgba(124,58,237,0.25)", borderRadius: 10, padding: "12px 16px", marginBottom: 16, fontSize: 12, color: T.textMuted2 }}>
-              🎉 <strong style={{ color: "#a78bfa" }}>For Fun!</strong> Tournament results don't affect League Standings or points — just for casual knockout games between matches.
-            </div>
-
-            {!tournament && (
-              <div style={s.card}>
-                <div style={s.sectionTitle}>🎉 New Tournament</div>
-                {!isManager && <div style={s.empty}>No tournament running. Ask the manager to start one!</div>}
-                {isManager && (
-                  <>
-                    {players.length < 2 ? (
-                      <div style={s.empty}>Add at least 2 players first.</div>
-                    ) : (
-                      <>
-                        <div style={{ marginBottom: 12 }}>
-                          <label style={s.label}>Tournament Name</label>
-                          <input style={s.input} placeholder="e.g. Friday Knockout" value={tournamentName} onChange={e => setTournamentName(e.target.value)} />
-                        </div>
-                        <label style={s.label}>Select Players ({tournamentSelected.length} selected)</label>
-                        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
-                          {players.map(p => {
-                            const selected = tournamentSelected.includes(p.id);
-                            return (
-                              <button
-                                key={p.id}
-                                onClick={() => setTournamentSelected(prev => selected ? prev.filter(id => id !== p.id) : [...prev, p.id])}
-                                style={{
-                                  display: "flex", alignItems: "center", gap: 6,
-                                  background: selected ? "rgba(124,58,237,0.15)" : T.bg,
-                                  border: `1px solid ${selected ? "#7c3aed" : T.border}`,
-                                  borderRadius: 20, padding: "6px 12px", cursor: "pointer",
-                                  color: selected ? "#a78bfa" : T.text, fontSize: 12, fontWeight: 600
-                                }}
-                              >
-                                <Avatar name={p.name} size={20} photo={p.photo} />
-                                {p.name}
-                              </button>
-                            );
-                          })}
-                        </div>
-                        <button style={{ ...s.btn("#7c3aed"), opacity: tournamentSelected.length < 2 ? 0.5 : 1, cursor: tournamentSelected.length < 2 ? "not-allowed" : "pointer" }} disabled={tournamentSelected.length < 2} onClick={startTournament}>
-                          🎉 Start Tournament ({tournamentSelected.length} players)
-                        </button>
-                        {tournamentSelected.length === 1 && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6, textAlign: "center" }}>Select at least 2 players.</div>}
-                      </>
-                    )}
-                  </>
-                )}
-              </div>
-            )}
-
-            {tournament && (
-              <>
-                <div style={{ ...s.card, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                  <div>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: T.textMuted, letterSpacing: 1, textTransform: "uppercase" }}>Tournament</div>
-                    <div style={{ fontSize: 18, fontWeight: 800, color: "#a78bfa" }}>🎉 {tournament.name}</div>
-                  </div>
-                  {isManager && (
-                    <button style={{ ...s.btn("#374151"), marginTop: 0, width: "auto", padding: "8px 14px", fontSize: 12 }} onClick={endTournament}>
-                      ✕ End
-                    </button>
-                  )}
-                </div>
-
-                {tournament.champion && (
-                  <div style={{ ...s.card, background: "linear-gradient(135deg, rgba(124,58,237,0.15), rgba(124,58,237,0.03))", border: "1px solid rgba(124,58,237,0.3)", textAlign: "center" }}>
-                    <div style={{ fontSize: 12, color: "#a78bfa", fontWeight: 700, letterSpacing: 1, textTransform: "uppercase", marginBottom: 10 }}>🏆 Champion</div>
-                    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
-                      <Avatar name={tournament.champion.name} size={56} photo={tournament.champion.photo} />
-                      <div style={{ fontSize: 20, fontWeight: 800, color: T.textBright }}>{tournament.champion.name}</div>
-                    </div>
-                  </div>
-                )}
-
-                {/* Bracket rounds */}
-                {tournament.rounds.map((round, ri) => (
-                  <div key={ri} style={s.card}>
-                    <div style={s.sectionTitle}>
-                      {ri === tournament.rounds.length - 1 && tournament.champion
-                        ? "🏆 Final"
-                        : getRoundName(round.length)}
-                    </div>
-                    {round.map((m, mi) => {
-                      const p1Done = !!m.p1, p2Done = !!m.p2;
-                      const isBye = p1Done && !p2Done;
-                      return (
-                        <div key={m.id} style={{ border: `1px solid ${T.border}`, borderRadius: 10, padding: 10, marginBottom: 10 }}>
-                          {/* Player 1 */}
-                          <div
-                            onClick={() => isManager && p1Done && p2Done && !m.winner && setBracketWinner(ri, mi, "p1")}
-                            style={{
-                              display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 8,
-                              background: m.winner === "p1" ? "rgba(34,197,94,0.1)" : "transparent",
-                              cursor: (isManager && p2Done && !m.winner) ? "pointer" : "default",
-                              opacity: m.winner === "p2" ? 0.4 : 1,
-                            }}
-                          >
-                            {p1Done ? <Avatar name={m.p1.name} size={28} photo={m.p1.photo} /> : <div style={{ width: 28, height: 28, borderRadius: "50%", border: `1px dashed ${T.border}` }} />}
-                            <span style={{ fontSize: 13, fontWeight: 600, color: p1Done ? T.text : T.textMuted, flex: 1 }}>{p1Done ? m.p1.name : "TBD"}</span>
-                            {m.winner === "p1" && <span style={{ fontSize: 16 }}>✅</span>}
-                          </div>
-                          <div style={{ textAlign: "center", fontSize: 11, color: T.textMuted, fontWeight: 700, padding: "2px 0" }}>
-                            {isBye ? "BYE — auto advances" : "vs"}
-                          </div>
-                          {/* Player 2 */}
-                          <div
-                            onClick={() => isManager && p1Done && p2Done && !m.winner && setBracketWinner(ri, mi, "p2")}
-                            style={{
-                              display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 8,
-                              background: m.winner === "p2" ? "rgba(34,197,94,0.1)" : "transparent",
-                              cursor: (isManager && p2Done && !m.winner) ? "pointer" : "default",
-                              opacity: m.winner === "p1" ? 0.4 : 1,
-                            }}
-                          >
-                            {p2Done ? <Avatar name={m.p2.name} size={28} photo={m.p2.photo} /> : <div style={{ width: 28, height: 28, borderRadius: "50%", border: `1px dashed ${T.border}` }} />}
-                            <span style={{ fontSize: 13, fontWeight: 600, color: p2Done ? T.text : T.textMuted, flex: 1 }}>{p2Done ? m.p2.name : (isBye ? "—" : "TBD")}</span>
-                            {m.winner === "p2" && <span style={{ fontSize: 16 }}>✅</span>}
-                          </div>
-                          {isManager && p1Done && p2Done && !m.winner && (
-                            <div style={{ fontSize: 10, color: T.textMuted, textAlign: "center", marginTop: 6 }}>Tap a player to advance them</div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                ))}
-              </>
-            )}
-          </>
-          </ErrorBoundary>
-        )}
       </div>
     </div>
   );
