@@ -1,6 +1,9 @@
 {
+  "framework": "vite",
   "buildCommand": "npm install && npm run build",
   "outputDirectory": "dist",
-  "framework": "vite",
-  "nodeVersion": "20.x"
+  "nodeVersion": "20.x",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
 }
